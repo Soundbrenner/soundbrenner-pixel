@@ -480,7 +480,7 @@ final class AppPreferencesStore {
 
 final class OpenAIImageService: Sendable {
     private static let requestTimeout: TimeInterval = 1_200
-    private static let visionQCModels = ["gpt-4.1-mini", "gpt-4o-mini"]
+    private static let visionQCModels = ["gpt-5.6-luna", "gpt-4.1-mini"]
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Soundbrenner Pixel",
         category: "OpenAI"
@@ -927,7 +927,7 @@ final class OpenAIImageService: Sendable {
             ["type": "image_url", "image_url": payload]
         })
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "messages": [
                 [
@@ -939,9 +939,13 @@ final class OpenAIImageService: Sendable {
                     "content": content
                 ]
             ],
-            "temperature": 0,
             "response_format": ["type": "json_object"]
         ]
+        if model.hasPrefix("gpt-5") {
+            body["reasoning_effort"] = "low"
+        } else {
+            body["temperature"] = 0
+        }
 
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
         request.httpMethod = "POST"
