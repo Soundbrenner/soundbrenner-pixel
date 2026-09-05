@@ -480,7 +480,7 @@ final class AppPreferencesStore {
 
 final class OpenAIImageService: Sendable {
     private static let requestTimeout: TimeInterval = 1_200
-    private static let visionQCModels = ["gpt-5.6-luna", "gpt-4.1-mini"]
+    private static let visionQCModels = ["gpt-5.6-luna", "gpt-5.6-terra"]
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Soundbrenner Pixel",
         category: "OpenAI"
@@ -941,7 +941,7 @@ final class OpenAIImageService: Sendable {
             ],
             "response_format": ["type": "json_object"]
         ]
-        if model.hasPrefix("gpt-5") {
+        if model.hasPrefix("gpt-5") || model.hasPrefix("gpt-6") {
             body["reasoning_effort"] = "low"
         } else {
             body["temperature"] = 0
