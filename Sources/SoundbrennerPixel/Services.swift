@@ -487,7 +487,7 @@ final class AppPreferencesStore {
 
 final class OpenAIImageService: Sendable {
     private static let requestTimeout: TimeInterval = 1_200
-    private static let visionQCModels = ["gpt-5.6-luna", "gpt-5.6-terra"]
+    private static let visionQCModels = ["gpt-5.6-luna", "gpt-6-astra"]
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Soundbrenner Pixel",
         category: "OpenAI"
