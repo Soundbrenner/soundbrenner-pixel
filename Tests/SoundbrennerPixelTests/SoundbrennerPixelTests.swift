@@ -216,3 +216,28 @@ import Testing
     #expect(form.geminiAspectRatio == .portraitNineBySixteen)
     #expect(form.geminiImageSize == .fourK)
 }
+
+@Test func image25UpgradePreservesHistoricalDecodingAndGeminiChoices() throws {
+    var legacy = GenerationForm()
+    legacy.imageModel = "gpt-image-2"
+    legacy.quality = .low
+    let data = try JSONEncoder().encode(legacy)
+    var restored = try JSONDecoder().decode(GenerationForm.self, from: data)
+    #expect(restored.imageModel == "gpt-image-2")
+    #expect(restored.quality == .low)
+    restored.upgradeLegacyImageDefaults()
+    #expect(restored.imageModel == "gpt-image-2.5-sunburst")
+    #expect(restored.quality == .max)
+    var gemini = legacy
+    gemini.imageModel = GeminiImageService.nanoBananaProModel
+    gemini.upgradeLegacyImageDefaults()
+    #expect(gemini.imageModel == GeminiImageService.nanoBananaProModel)
+    #expect(gemini.quality == .low)
+}
+
+@Test func image25QualityOptionsStayCompatibleWithOlderModels() {
+    #expect(ImageQuality.supported(by: "gpt-image-2.5-sunburst").contains(.max))
+    #expect(ImageQuality.supported(by: "gpt-image-2.5-flare").contains(.xhigh))
+    #expect(!ImageQuality.supported(by: "gpt-image-2").contains(.max))
+    #expect(ImageModelOption(id: "gpt-image-2.5-sunburst-2026-09-08").isSnapshot)
+}

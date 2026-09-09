@@ -226,7 +226,7 @@ final class AppPreferencesStore {
     func loadForm() -> GenerationForm? {
         if let data = defaults.data(forKey: formKey),
            let form = try? JSONDecoder().decode(GenerationForm.self, from: data) {
-            return form
+            return upgradeImagePreferences(form)
         }
 
         guard let data = legacyDefaults?.data(forKey: formKey) else {
@@ -234,8 +234,15 @@ final class AppPreferencesStore {
         }
 
         let form = try? JSONDecoder().decode(GenerationForm.self, from: data)
-        if let form {
+        return form.map(upgradeImagePreferences)
+    }
+
+    private func upgradeImagePreferences(_ savedForm: GenerationForm) -> GenerationForm {
+        var form = savedForm
+        if !defaults.bool(forKey: "image25_defaults_migrated") {
+            form.upgradeLegacyImageDefaults()
             saveForm(form)
+            defaults.set(true, forKey: "image25_defaults_migrated")
         }
         return form
     }
@@ -512,8 +519,9 @@ final class OpenAIImageService: Sendable {
             .map(\.id)
             .filter { $0.hasPrefix("gpt-image-") }
             .sorted { lhs, rhs in
-                if lhs == "gpt-image-2" { return true }
-                if rhs == "gpt-image-2" { return false }
+                if lhs == rhs { return false }
+                if lhs == ImageModelOption.preferredModel { return true }
+                if rhs == ImageModelOption.preferredModel { return false }
                 return lhs.localizedStandardCompare(rhs) == .orderedAscending
             }
 
@@ -524,6 +532,8 @@ final class OpenAIImageService: Sendable {
     }
 
     static let defaultImageModels: [ImageModelOption] = [
+        ImageModelOption(id: ImageModelOption.preferredModel),
+        ImageModelOption(id: "gpt-image-2.5-flare"),
         ImageModelOption(id: GeminiImageService.nanoBananaProModel),
         ImageModelOption(id: "gpt-image-2"),
         ImageModelOption(id: "gpt-image-2-2026-04-21"),
@@ -5695,7 +5705,7 @@ final class AppModel: ObservableObject {
             availableImageModels = OpenAIImageService.defaultImageModels
             imageModelRefreshStatus = "Add an API key to refresh the live model list."
             if !availableImageModels.contains(where: { $0.id == form.imageModel }) {
-                form.imageModel = availableImageModels.first?.id ?? "gpt-image-2"
+                form.imageModel = availableImageModels.first?.id ?? ImageModelOption.preferredModel
             }
             return
         }
@@ -5704,13 +5714,13 @@ final class AppModel: ObservableObject {
             let models = try await service.fetchAvailableImageModels(apiKey: trimmedKey)
             availableImageModels = models
             if !models.contains(where: { $0.id == form.imageModel }) {
-                form.imageModel = models.first?.id ?? "gpt-image-2"
+                form.imageModel = models.first?.id ?? ImageModelOption.preferredModel
             }
             imageModelRefreshStatus = "Live model list refreshed from the API."
         } catch {
             availableImageModels = OpenAIImageService.defaultImageModels
             if !availableImageModels.contains(where: { $0.id == form.imageModel }) {
-                form.imageModel = availableImageModels.first?.id ?? "gpt-image-2"
+                form.imageModel = availableImageModels.first?.id ?? ImageModelOption.preferredModel
             }
             imageModelRefreshStatus = "Live refresh failed. Using fallback list."
         }
@@ -6884,8 +6894,8 @@ final class AppModel: ObservableObject {
                     apiKey: apiKey,
                     imageURL: sourceURL,
                     prompt: attemptPrompt,
-                    model: "gpt-image-2",
-                    quality: .low,
+                    model: ImageModelOption.preferredModel,
+                    quality: .max,
                     size: outputSize,
                     outputFormat: outputFormat,
                     moderation: .low

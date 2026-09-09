@@ -299,8 +299,8 @@ private struct GeneratorSidebar: View {
 
                 if appModel.generatorMode == .regular {
                     Picker("Quality", selection: $formDraft.quality) {
-                        ForEach(ImageQuality.allCases) { quality in
-                            Text(quality.titleWithPricingHint).tag(quality)
+                        ForEach(ImageQuality.supported(by: formDraft.imageModel)) { quality in
+                            Text(quality.title).tag(quality)
                         }
                     }
                     .disabled(formDraft.imageModel.isGeminiImageModel)
@@ -320,7 +320,7 @@ private struct GeneratorSidebar: View {
                     } else {
                         Picker("Resolution", selection: $formDraft.resolution) {
                             ForEach(ResolutionPreset.allCases) { preset in
-                                Text("\(preset.titleWithPricingHint) • \(preset.subtitle)")
+                                Text("\(preset.title) • \(preset.subtitle)")
                                     .tag(preset)
                             }
                         }
@@ -329,7 +329,7 @@ private struct GeneratorSidebar: View {
                     Text(
                         formDraft.imageModel.isGeminiImageModel
                             ? "Nano Banana Pro currently costs about $0.134 per 1K/2K image and $0.24 per 4K image."
-                            : "Cost hints are approximate and only cover image-generation cost, not prompt text or edits."
+                            : "Image cost depends on the model, quality, size, and reference images. Sunburst prioritizes precision; Flare prioritizes speed."
                     )
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -771,6 +771,9 @@ private struct GeneratorSidebar: View {
             }
             .labelsHidden()
             .onChange(of: formDraft.imageModel) { _, newModel in
+                if !ImageQuality.supported(by: newModel).contains(formDraft.quality) {
+                    formDraft.quality = .high
+                }
                 if newModel.isGeminiImageModel {
                     formDraft.outputFormat = .png
                 }

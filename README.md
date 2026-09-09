@@ -58,7 +58,7 @@ Both API keys are stored in macOS Keychain. They are not written to the reposito
 2. Enter a prompt.
 3. Optionally add reference photos.
 4. Choose an image model:
-   - OpenAI models expose quality, moderation, and combined resolution presets.
+   - GPT Image 2.5 Sunburst at Max quality is the default. Flare is available when speed matters more. OpenAI models expose quality, moderation, and combined resolution presets.
    - Nano Banana Pro exposes independent aspect-ratio and output-size controls.
 5. Choose the number of images and output format. JPEG and WebP also expose compression quality.
 6. Choose a shot mode:
@@ -81,6 +81,8 @@ The ad-localization mode is tailored to Soundbrenner's products and market rules
 4. Select a product only when the source ad contains that product's price or savings claim.
 5. Add an Audio Chronicle link only when its article title appears in the source ad.
 6. Add and save an OpenAI API key, then click **Generate localized ads**.
+
+Ad localization uses GPT Image 2.5 Sunburst at Max quality to preserve the original artwork while changing text.
 
 Output files are written into a `Localized ads` folder beside the source images. Existing outputs are not regenerated. English CAD, AUD, and GBP variants are skipped when the source contains no price, savings, percentage, or currency-specific claim.
 

@@ -21,11 +21,17 @@ enum ImageQuality: String, CaseIterable, Codable, Identifiable {
     case low
     case medium
     case high
+    case xhigh
+    case max
 
     var id: String { rawValue }
 
     var title: String {
-        rawValue.capitalized
+        self == .xhigh ? "Extra high" : rawValue.capitalized
+    }
+
+    static func supported(by model: String) -> [ImageQuality] {
+        model.hasPrefix("gpt-image-2.5-") ? allCases : [.auto, .low, .medium, .high]
     }
 
     var pricingHint: String {
@@ -35,9 +41,11 @@ enum ImageQuality: String, CaseIterable, Codable, Identifiable {
         case .low:
             "baseline"
         case .medium:
-            "~3.8x low"
+            "cost varies"
         case .high:
-            "~14.8x low"
+            "cost varies"
+        case .xhigh, .max:
+            "cost varies"
         }
     }
 
@@ -191,8 +199,8 @@ struct GenerationForm: Codable, Equatable {
     var cameraJSON = ""
     var shotMode: ShotMode = .withModel
     var audience: AudienceKind = .musicians
-    var imageModel = "gpt-image-2"
-    var quality: ImageQuality = .high
+    var imageModel = ImageModelOption.preferredModel
+    var quality: ImageQuality = .max
     var resolution: ResolutionPreset = .landscape2k
     var geminiAspectRatio: GeminiAspectRatio = .landscapeSixteenByNine
     var geminiImageSize: GeminiImageSize = .twoK
@@ -203,6 +211,12 @@ struct GenerationForm: Codable, Equatable {
 
     var sanitizedImageCount: Int {
         min(max(imageCount, 1), 8)
+    }
+
+    mutating func upgradeLegacyImageDefaults() {
+        guard imageModel.hasPrefix("gpt-image-"), !imageModel.hasPrefix("gpt-image-2.5-") else { return }
+        imageModel = ImageModelOption.preferredModel
+        quality = .max
     }
 
     enum CodingKeys: String, CodingKey {
@@ -1713,12 +1727,13 @@ extension CameraProfile {
 }
 
 struct ImageModelOption: Identifiable, Hashable {
+    static let preferredModel = "gpt-image-2.5-sunburst"
     let id: String
     let isSnapshot: Bool
 
     init(id: String) {
         self.id = id
-        self.isSnapshot = id.range(of: #"gpt-image-[\d.]+-\d{4}-\d{2}-\d{2}"#, options: .regularExpression) != nil
+        self.isSnapshot = id.range(of: #"gpt-image-[\d.]+(?:-[a-z]+)?-\d{4}-\d{2}-\d{2}"#, options: .regularExpression) != nil
     }
 
     var title: String {
