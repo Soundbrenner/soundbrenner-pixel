@@ -1736,6 +1736,26 @@ struct ImageModelOption: Identifiable, Hashable {
         self.isSnapshot = id.range(of: #"gpt-image-[\d.]+(?:-[a-z]+)?-\d{4}-\d{2}-\d{2}"#, options: .regularExpression) != nil
     }
 
+    var guidance: String {
+        let description: String
+        if id.hasPrefix("gpt-image-2.5-sunburst") {
+            description = "Best default for polished final images and precise edits. Choose Sunburst when preserving product details matters more than speed."
+        } else if id.hasPrefix("gpt-image-2.5-flare") {
+            description = "Best for quick iterations and everyday images. Choose Flare when speed matters, or Sunburst when editing precision matters most."
+        } else if id.isGeminiImageModel {
+            description = "Google's image model. Try it for a different visual result, with separate aspect-ratio and resolution controls."
+        } else if id.hasPrefix("gpt-image-2") {
+            description = "Previous-generation OpenAI model. Keep it for existing workflows, or choose Sunburst for new final images."
+        } else if id.hasPrefix("gpt-image-1-mini") {
+            description = "Older compact OpenAI model. Keep it for existing workflows, or choose Flare for fast new image generation."
+        } else if id.hasPrefix("gpt-image-1") {
+            description = "Earlier OpenAI image model. Useful when continuing an older workflow. Sunburst is recommended for new final images."
+        } else {
+            description = "An additional image model available to your account. Try a small batch to compare its results with Sunburst."
+        }
+        return isSnapshot ? description + " This dated version stays fixed instead of following model updates." : description
+    }
+
     var title: String {
         if id == "gemini-3-pro-image" {
             return "Nano Banana Pro (Gemini 3 Pro Image)"

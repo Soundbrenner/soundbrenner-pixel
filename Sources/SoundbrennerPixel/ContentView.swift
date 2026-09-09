@@ -329,7 +329,7 @@ private struct GeneratorSidebar: View {
                     Text(
                         formDraft.imageModel.isGeminiImageModel
                             ? "Nano Banana Pro currently costs about $0.134 per 1K/2K image and $0.24 per 4K image."
-                            : "Image cost depends on the model, quality, size, and reference images. Sunburst prioritizes precision; Flare prioritizes speed."
+                            : "Image cost depends on the model, quality, size, and reference images."
                     )
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -778,6 +778,11 @@ private struct GeneratorSidebar: View {
                     formDraft.outputFormat = .png
                 }
             }
+
+            Text(ImageModelOption(id: formDraft.imageModel).guidance)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             if formDraft.imageModel.isGeminiImageModel {
                 Text("Nano Banana Pro uses Gemini billing and generates native PNG images. Choose aspect ratio and resolution independently; OpenAI quality and moderation controls do not apply.")
