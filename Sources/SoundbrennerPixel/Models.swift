@@ -1105,6 +1105,14 @@ enum RandomModelMode: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+enum PromptSearch {
+    static func matches(_ prompt: String, query: String) -> Bool {
+        query.split(whereSeparator: { $0.isWhitespace }).allSatisfy {
+            prompt.range(of: String($0), options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
+    }
+}
+
 struct GenerationJob: Identifiable, Codable, Hashable {
     let id: UUID
     let createdAt: Date

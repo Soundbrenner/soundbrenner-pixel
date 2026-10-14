@@ -131,6 +131,7 @@ struct ContentView: View {
     @EnvironmentObject private var promptPresetStore: PromptPresetStore
     @AppStorage("generator_sidebar_width") private var sidebarWidth = SidebarLayout.defaultWidth
     @State private var previewedImage: GalleryPreviewItem?
+    @State private var promptSearch = ""
 
     private let columns = [
         GridItem(.adaptive(minimum: 220, maximum: 320), spacing: 16)
@@ -215,7 +216,6 @@ private struct GeneratorSidebar: View {
     @EnvironmentObject private var adAngleStore: AdAngleStore
     @EnvironmentObject private var promotionalContextStore: PromotionalContextStore
     @EnvironmentObject private var promptPresetStore: PromptPresetStore
-    @Environment(\.scenePhase) private var scenePhase
 
     @State private var formDraft = GenerationForm()
     @State private var apiKeyDraft = ""
@@ -430,7 +430,8 @@ private struct GeneratorSidebar: View {
             generationFooter
         }
         .onAppear {
-            refreshJSONLibraries()
+            // Stores restore their startup caches during initialization. Reloading
+            // cloud-backed libraries here blocks the first window and defeats them.
             guard !hasLoadedDraft else {
                 return
             }
@@ -439,12 +440,6 @@ private struct GeneratorSidebar: View {
             geminiAPIKeyDraft = appModel.geminiAPIKey
             shotModeSelections[appModel.form.shotMode] = currentShotModeSelection()
             hasLoadedDraft = true
-        }
-        .onChange(of: scenePhase) { _, newPhase in
-            guard newPhase == .active else {
-                return
-            }
-            refreshJSONLibraries()
         }
         .onChange(of: formDraft) { _, newValue in
             guard hasLoadedDraft else {
@@ -1526,9 +1521,35 @@ private struct GeneratorSidebar: View {
 }
 
 private extension ContentView {
+    private var matchingJobs: [GenerationJob] {
+        galleryStore.jobs.filter { PromptSearch.matches($0.inputPrompt, query: promptSearch) }
+    }
 
     private var detail: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if appModel.generatorMode != .adLocalization {
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search prompts", text: $promptSearch)
+                        .textFieldStyle(.plain)
+                        .accessibilityLabel("Search prompts")
+                    if !promptSearch.isEmpty {
+                        Button {
+                            promptSearch = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Clear prompt search")
+                    }
+                    Text("\(matchingJobs.count) results")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(16)
+                Divider()
+            }
             if appModel.generatorMode == .adLocalization {
                 adLocalizationDetail
             } else if !appModel.pendingGenerations.isEmpty || !galleryStore.jobs.isEmpty {
@@ -1538,7 +1559,10 @@ private extension ContentView {
                             pendingGenerationsSection
                         }
 
-                        ForEach(galleryStore.jobs) { job in
+                        if matchingJobs.isEmpty && !promptSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            ContentUnavailableView("No Matching Prompts", systemImage: "magnifyingglass", description: Text("Try different words or clear the search."))
+                        }
+                        ForEach(matchingJobs) { job in
                             VStack(alignment: .leading, spacing: 8) {
                                 header(for: job)
 

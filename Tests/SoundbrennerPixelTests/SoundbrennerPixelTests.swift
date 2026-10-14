@@ -2,6 +2,13 @@ import Foundation
 import Testing
 @testable import SoundbrennerPixel
 
+@Test func promptSearchMatchesWordsIgnoringCaseAndAccents() {
+    #expect(PromptSearch.matches("A guitarist in a café", query: "CAFE guitarist"))
+    #expect(PromptSearch.matches("Any prompt", query: "  \n "))
+    #expect(!PromptSearch.matches("A guitarist", query: "guitarist drums"))
+    #expect(!PromptSearch.matches("", query: "guitar"))
+}
+
 @Test func pngRequestsOmitCompression() async throws {
     var form = GenerationForm()
     form.prompt = "A gold metronome in a brutalist studio"
