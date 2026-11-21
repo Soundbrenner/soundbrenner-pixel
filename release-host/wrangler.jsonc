@@ -1,0 +1,11 @@
+{
+  "name": "pixel-releases",
+  "main": "index.mjs",
+  "account_id": "7c28cd9ef2aed1dcdea11e46b57cff99",
+  "compatibility_date": "2026-11-19",
+  "workers_dev": true,
+  "preview_urls": false,
+  "upload_source_maps": true,
+  "observability": { "enabled": true, "head_sampling_rate": 0.1 },
+  "r2_buckets": [{ "binding": "RELEASES", "bucket_name": "soundbrenner-pixel-releases" }]
+}

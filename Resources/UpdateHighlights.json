@@ -1,0 +1,34 @@
+{
+  "59": [
+    "Fixed sidebar clipping when dragging the divider, including on narrower windows.",
+    "Removed the Localize ads workflow."
+  ],
+  "58": [
+    "Cream action buttons now change shade on hover.",
+    "The generation and ad localization panels have less on-screen copy."
+  ],
+  "57": [
+    "Soundbrenner Pixel is now Mediaforge, with a new icon and native macOS controls.",
+    "Scan the gallery faster with readable prompt titles and tighter image previews.",
+    "Opening Mediaforge again brings the running app forward."
+  ],
+  "56": [
+    "Mediaforge has a unified macOS toolbar, native Liquid Glass controls, and a quieter gallery.",
+    "Find prompt search and your Soundbrenner account in the toolbar."
+  ],
+  "55": [
+    "Adds Soundbrenner sign-in support. Team-funded generation requires a configured service.",
+    "Mediaforge has a new hammer icon and cream primary buttons."
+  ],
+  "54": [
+    "Soundbrenner Pixel is now Mediaforge."
+  ],
+  "53": [
+    "Pixel now keeps only one copy of the app running, even if you open it from two locations."
+  ],
+  "51": [
+    "Install Pixel from the Soundbrenner Team Dropbox folder.",
+    "Get automatic update checks and see what changed before you install.",
+    "Ad localization falls back to GPT-6.2 Astra when Luna is unavailable for image review."
+  ]
+}

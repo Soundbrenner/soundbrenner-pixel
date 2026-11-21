@@ -1,21 +1,5 @@
 import Foundation
 
-enum GeneratorMode: String, CaseIterable, Codable, Identifiable {
-    case regular
-    case adLocalization
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .regular:
-            "Regular"
-        case .adLocalization:
-            "Ad localization"
-        }
-    }
-}
-
 enum ImageQuality: String, CaseIterable, Codable, Identifiable {
     case auto
     case low
@@ -509,375 +493,6 @@ struct GeneratedImagePayload {
     let format: OutputFormat
 }
 
-enum AdLocalizationLanguage: String, CaseIterable, Codable, Identifiable, Hashable {
-    case englishUSD
-    case englishGBP
-    case englishAUD
-    case englishCAD
-    case germanEUR
-    case frenchEUR
-    case spanishEUR
-    case italianEUR
-    case japaneseJPY
-    case koreanKRW
-
-    static let allCases: [AdLocalizationLanguage] = [
-        .englishGBP,
-        .englishAUD,
-        .englishCAD,
-        .germanEUR,
-        .frenchEUR,
-        .spanishEUR,
-        .italianEUR,
-        .japaneseJPY,
-        .koreanKRW
-    ]
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .englishUSD: "English + USD"
-        case .englishGBP: "English + GBP"
-        case .englishAUD: "English + AUD"
-        case .englishCAD: "English + CAD"
-        case .germanEUR: "German + EUR"
-        case .frenchEUR: "French + EUR"
-        case .spanishEUR: "Spanish + EUR"
-        case .italianEUR: "Italian + EUR"
-        case .japaneseJPY: "Japanese + JPY"
-        case .koreanKRW: "Korean + KRW"
-        }
-    }
-
-    var localeName: String {
-        switch self {
-        case .englishUSD: "English for the United States"
-        case .englishGBP: "English for the United Kingdom"
-        case .englishAUD: "English for Australia"
-        case .englishCAD: "English for Canada"
-        case .germanEUR: "German for Germany"
-        case .frenchEUR: "French for France"
-        case .spanishEUR: "Spanish for Spain"
-        case .italianEUR: "Italian for Italy"
-        case .japaneseJPY: "Japanese for Japan"
-        case .koreanKRW: "Korean for South Korea"
-        }
-    }
-
-    var outputCode: String {
-        switch self {
-        case .englishUSD: "en-US"
-        case .englishGBP: "en-GB"
-        case .englishAUD: "en-AU"
-        case .englishCAD: "en-CA"
-        case .germanEUR: "de-EUR"
-        case .frenchEUR: "fr-EUR"
-        case .spanishEUR: "es-EUR"
-        case .italianEUR: "it-EUR"
-        case .japaneseJPY: "ja-JP"
-        case .koreanKRW: "ko-KR"
-        }
-    }
-
-    var languageCode: String {
-        switch self {
-        case .englishUSD, .englishGBP, .englishAUD, .englishCAD: "en"
-        case .germanEUR: "de"
-        case .frenchEUR: "fr"
-        case .spanishEUR: "es"
-        case .italianEUR: "it"
-        case .japaneseJPY: "ja"
-        case .koreanKRW: "ko"
-        }
-    }
-
-    var countryCode: String {
-        switch self {
-        case .englishUSD: "US"
-        case .englishGBP: "GB"
-        case .englishAUD: "AU"
-        case .englishCAD: "CA"
-        case .germanEUR, .frenchEUR, .spanishEUR, .italianEUR: "DE"
-        case .japaneseJPY: "JP"
-        case .koreanKRW: "KR"
-        }
-    }
-
-    var marketCode: String {
-        switch self {
-        case .englishUSD: "US"
-        case .englishGBP: "GB"
-        case .englishAUD: "AU"
-        case .englishCAD: "CA"
-        case .germanEUR, .frenchEUR, .spanishEUR, .italianEUR: "EU"
-        case .japaneseJPY: "JP"
-        case .koreanKRW: "KR"
-        }
-    }
-
-    var currencyCode: String {
-        switch self {
-        case .englishUSD: "USD"
-        case .englishGBP: "GBP"
-        case .englishAUD: "AUD"
-        case .englishCAD: "CAD"
-        case .germanEUR, .frenchEUR, .spanishEUR, .italianEUR: "EUR"
-        case .japaneseJPY: "JPY"
-        case .koreanKRW: "KRW"
-        }
-    }
-
-    var localeIdentifier: String {
-        switch self {
-        case .englishUSD: "en_US"
-        case .englishGBP: "en_GB"
-        case .englishAUD: "en_AU"
-        case .englishCAD: "en_CA"
-        case .germanEUR: "de_DE"
-        case .frenchEUR: "fr_FR"
-        case .spanishEUR: "es_ES"
-        case .italianEUR: "it_IT"
-        case .japaneseJPY: "ja_JP"
-        case .koreanKRW: "ko_KR"
-        }
-    }
-
-    var phraseGuidance: String {
-        switch self {
-        case .germanEUR:
-            """
-            German brand voice:
-            - Use informal consumer-brand German: du, dein, dir. Never use Sie, Ihnen, Ihr, or formal business German.
-            - Write like a modern consumer electronics brand on Instagram/Facebook: simple, confident, direct, and natural.
-            - Prefer concise ad phrasing such as "Spare jetzt", "Nur kurze Zeit", and "Wieder da" when it fits the source layout.
-
-            If these common ad phrases are present, localize them exactly:
-            - "CRAZY SUMMER DEAL" -> "IRRER SOMMERDEAL"
-            - "SUMMER SALE" -> "SOMMERANGEBOT"
-            - "SPECIAL OFFER" -> "SONDERANGEBOT"
-            - "FINAL HOURS" -> "LETZTE STUNDEN"
-            - "BACK IN STOCK" -> "WIEDER AUF LAGER"
-            - "{percent}% OFF SITE WIDE" -> "{percent}% RABATT AUF ALLES"
-            - "LIMITED TIME!" -> "NUR KURZE ZEIT!"
-            - "LAST CHANCE!!" -> "LETZTE CHANCE!!"
-            - "Decline" -> "Ablehnen"
-            - "Accept" -> "Annehmen"
-            """
-        case .englishUSD, .englishGBP, .englishAUD, .englishCAD:
-            """
-            English brand voice:
-            - Keep concise native English in a modern consumer electronics tone.
-            - Think Apple-like advertising: clear, confident, simple, never shouty or literal.
-            - Adapt currency, prices, shipping wording, and region-specific offer phrasing to \(localeName).
-            - If the target is Canada, Australia, or the UK, this is not a copy-through English run: replace USD source amounts with the exact target-market amount and currency display from the truth packet.
-            - Do not make the copy sound like a translation.
-            """
-        case .frenchEUR:
-            """
-            French brand voice:
-            - Use concise, natural consumer-brand French for Meta ads, not stiff corporate French.
-            - Prefer clear, polished, Apple-like phrasing over literal translation.
-            - Keep urgency and offers short enough to fit the original layout.
-            - Preserve brand names, product names, URLs, promo codes, trademarks, and exact price facts.
-
-            If these common ad phrases are present, localize them with the live percent from the truth packet:
-            - "{percent}% OFF" -> "-{percent} %"
-            - "UP TO {percent}% OFF" -> "JUSQU'A -{percent} %"
-            - "{percent}% OFF SITE WIDE" -> "-{percent} % SUR TOUT LE SITE"
-            """
-        case .spanishEUR:
-            """
-            Spanish brand voice:
-            - Use natural European Spanish for Spain.
-            - Use tú/tu, not usted/su, unless the source is clearly formal.
-            - Keep the tone direct, polished, and consumer-brand friendly.
-            - Preserve brand names, product names, URLs, promo codes, trademarks, and exact price facts.
-
-            If these common ad phrases are present, localize them with the live percent from the truth packet:
-            - "{percent}% OFF" -> "{percent}% DTO."
-            - "UP TO {percent}% OFF" -> "HASTA {percent}% DTO."
-            - "{percent}% OFF SITE WIDE" -> "{percent}% DTO. EN TODO"
-            """
-        case .italianEUR:
-            """
-            Italian brand voice:
-            - Use natural consumer-brand Italian.
-            - Use tu/tuo, not Lei/Suo.
-            - Keep copy short, confident, and made for Instagram/Facebook, not literal.
-            - Preserve brand names, product names, URLs, promo codes, trademarks, and exact price facts.
-
-            If these common ad phrases are present, localize them with the live percent from the truth packet:
-            - "{percent}% OFF" -> "{percent}% DI SCONTO"
-            - "UP TO {percent}% OFF" -> "FINO AL {percent}% DI SCONTO"
-            - "{percent}% OFF SITE WIDE" -> "{percent}% DI SCONTO SU TUTTO"
-            """
-        case .japaneseJPY:
-            """
-            Japanese brand voice:
-            - Use polished, concise consumer-ad Japanese.
-            - Avoid stiff corporate or overly formal business Japanese.
-            - Keep urgency natural and compact; preserve layout fit over literal wording.
-            - Keep Soundbrenner and Wave Pro product names in Latin characters when that reads best.
-            - Preserve URLs, promo codes, trademarks, and exact price facts.
-
-            If these common ad phrases are present, localize them with the live percent from the truth packet:
-            - "{percent}% OFF" -> "{percent}%オフ"
-            - "UP TO {percent}% OFF" -> "最大{percent}%オフ"
-            - "{percent}% OFF SITE WIDE" -> "全品{percent}%オフ"
-            - "SITE WIDE" -> "全品対象"
-            """
-        case .koreanKRW:
-            """
-            Korean brand voice:
-            - Use polished, concise consumer-brand Korean for Meta ads.
-            - Avoid stiff corporate phrasing and literal English structure.
-            - Keep urgency natural and compact; preserve layout fit over literal wording.
-            - Preserve brand names, product names, URLs, promo codes, trademarks, and exact price facts.
-
-            If these common ad phrases are present, localize them with the live percent from the truth packet:
-            - "{percent}% OFF" -> "{percent}% 할인"
-            - "UP TO {percent}% OFF" -> "최대 {percent}% 할인"
-            - "{percent}% OFF SITE WIDE" -> "전 상품 {percent}% 할인"
-            """
-        }
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        let rawValue = try container.decode(String.self)
-        switch rawValue {
-        case "german": self = .germanEUR
-        case "french": self = .frenchEUR
-        case "spanish": self = .spanishEUR
-        case "italian": self = .italianEUR
-        case "japanese": self = .japaneseJPY
-        case "korean": self = .koreanKRW
-        default:
-            guard let value = Self(rawValue: rawValue) else {
-                throw DecodingError.dataCorruptedError(
-                    in: container,
-                    debugDescription: "Unknown ad localization market: \(rawValue)"
-                )
-            }
-            self = value
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(rawValue)
-    }
-}
-
-enum AdLocalizationProduct: String, CaseIterable, Codable, Identifiable, Hashable {
-    case none
-    case wave
-    case wavePro
-    case spark
-    case pulse
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .none: "None"
-        case .wave: "Wave"
-        case .wavePro: "Wave Pro"
-        case .spark: "Spark"
-        case .pulse: "Pulse"
-        }
-    }
-
-    var productName: String {
-        switch self {
-        case .none: "None"
-        case .wave: "Soundbrenner Wave"
-        case .wavePro: "Soundbrenner Wave Pro"
-        case .spark: "Soundbrenner Spark"
-        case .pulse: "Soundbrenner Pulse"
-        }
-    }
-
-    var productID: String {
-        switch self {
-        case .none: ""
-        case .wave: "soundbrenner-wave-in-ear-monitors"
-        case .wavePro: "soundbrenner-wave-pro-in-ear-monitors"
-        case .spark: "soundbrenner-spark-music-practice-companion"
-        case .pulse: "soundbrenner-pulse-vibrating-metronome"
-        }
-    }
-
-    var shopifyProductID: String {
-        switch self {
-        case .none: ""
-        case .wave: "8222899831035"
-        case .wavePro: "9187329835259"
-        case .spark: "8634635288827"
-        case .pulse: "7972747903227"
-        }
-    }
-}
-
-enum AdLocalizationJobStatus: String, Codable, Hashable {
-    case queued
-    case running
-    case succeeded
-    case skipped
-    case failed
-
-    var title: String {
-        switch self {
-        case .queued: "Queued"
-        case .running: "Running"
-        case .succeeded: "Done"
-        case .skipped: "Skipped"
-        case .failed: "Failed"
-        }
-    }
-}
-
-struct AdLocalizationJob: Identifiable, Codable, Hashable {
-    let id: UUID
-    let sourceFileName: String
-    let sourcePath: String
-    let language: AdLocalizationLanguage
-    var status: AdLocalizationJobStatus
-    var attemptCount: Int
-    var outputPath: String?
-    var errorMessage: String?
-    var updatedAt: Date
-
-    init(
-        id: UUID = UUID(),
-        sourceURL: URL,
-        language: AdLocalizationLanguage,
-        status: AdLocalizationJobStatus = .queued,
-        attemptCount: Int = 0,
-        outputPath: String? = nil,
-        errorMessage: String? = nil,
-        updatedAt: Date = .now
-    ) {
-        self.id = id
-        self.sourceFileName = sourceURL.lastPathComponent
-        self.sourcePath = sourceURL.path
-        self.language = language
-        self.status = status
-        self.attemptCount = attemptCount
-        self.outputPath = outputPath
-        self.errorMessage = errorMessage
-        self.updatedAt = updatedAt
-    }
-}
-
-struct AdLocalizationFailure: Identifiable, Hashable {
-    let id: String
-    let sourceFileName: String
-    let languageTitle: String
-    let message: String
-}
-
 struct GalleryImage: Identifiable, Codable, Hashable {
     let id: UUID
     let fileName: String
@@ -1110,6 +725,33 @@ enum PromptSearch {
         query.split(whereSeparator: { $0.isWhitespace }).allSatisfy {
             prompt.range(of: String($0), options: [.caseInsensitive, .diacriticInsensitive]) != nil
         }
+    }
+}
+
+enum GalleryPromptTitle {
+    static func text(for prompt: String) -> String {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "Untitled prompt" }
+        guard trimmed.hasPrefix("{") || trimmed.hasPrefix("[") else { return trimmed }
+        guard trimmed.utf8.count <= 256 * 1024 else { return "Structured prompt" }
+        guard let value = try? JSONSerialization.jsonObject(with: Data(trimmed.utf8)) else {
+            return trimmed
+        }
+        guard let document = value as? [String: Any] else { return "Structured prompt" }
+        let scene = document["scene_configuration"] as? [String: Any]
+        let seasonal = scene?["seasonal_customization"] as? [String: Any]
+        let environment = (scene?["environment"] ?? document["environment"]) as? [String: Any]
+        let candidates = [
+            document["title"], document["name"], seasonal?["theme_name"],
+            scene?["title"], document["prompt"], environment?["location"]
+        ]
+        for candidate in candidates {
+            if let text = candidate as? String {
+                let label = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !label.isEmpty { return label }
+            }
+        }
+        return "Structured prompt"
     }
 }
 

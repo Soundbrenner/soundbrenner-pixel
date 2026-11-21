@@ -15,9 +15,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "A00000000000000000000050"
-               BuildableName = "Soundbrenner Pixel.app"
-               BlueprintName = "Soundbrenner Pixel"
-               ReferencedContainer = "container:Soundbrenner Pixel.xcodeproj">
+               BuildableName = "Mediaforge.app"
+               BlueprintName = "Mediaforge"
+               ReferencedContainer = "container:Mediaforge.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -45,9 +45,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A00000000000000000000050"
-            BuildableName = "Soundbrenner Pixel.app"
-            BlueprintName = "Soundbrenner Pixel"
-            ReferencedContainer = "container:Soundbrenner Pixel.xcodeproj">
+            BuildableName = "Mediaforge.app"
+            BlueprintName = "Mediaforge"
+            ReferencedContainer = "container:Mediaforge.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -62,9 +62,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A00000000000000000000050"
-            BuildableName = "Soundbrenner Pixel.app"
-            BlueprintName = "Soundbrenner Pixel"
-            ReferencedContainer = "container:Soundbrenner Pixel.xcodeproj">
+            BuildableName = "Mediaforge.app"
+            BlueprintName = "Mediaforge"
+            ReferencedContainer = "container:Mediaforge.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

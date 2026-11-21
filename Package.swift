@@ -4,17 +4,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "SoundbrennerPixel",
+    name: "Mediaforge",
     platforms: [
         .macOS(.v14)
     ],
     targets: [
         .executableTarget(
-            name: "SoundbrennerPixel"
+            name: "Mediaforge"
         ),
         .testTarget(
-            name: "SoundbrennerPixelTests",
-            dependencies: ["SoundbrennerPixel"]
+            name: "MediaforgeTests",
+            dependencies: ["Mediaforge"]
         ),
     ],
     swiftLanguageModes: [.v6]

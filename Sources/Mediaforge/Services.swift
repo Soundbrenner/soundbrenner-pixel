@@ -4,7 +4,6 @@ import Foundation
 import LocalAuthentication
 import Security
 import OSLog
-@preconcurrency import UserNotifications
 
 private enum PreferenceKeys {
     static let cameraProfileIDMigrationKey = "camera_profile_id_migrations_v1"
@@ -20,9 +19,6 @@ enum AppError: LocalizedError {
     case invalidModelJSON(String)
     case missingModelThumbnail(String)
     case modelRefreshFailed
-    case missingAdLocalizationFolder
-    case missingAdLocalizationLanguages
-    case emptyAdLocalizationFolder
     case requestTimedOut
     case networkConnectionLost
     case tooManyGeminiReferenceImages(Int)
@@ -31,7 +27,7 @@ enum AppError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingAPIKey:
-            "Add your OpenAI API key before generating images."
+            "Sign in with your Soundbrenner account or add your OpenAI API key before generating images."
         case .missingGeminiAPIKey:
             "Add your Gemini API key before using Nano Banana Pro."
         case .missingPrompt:
@@ -48,12 +44,6 @@ enum AppError: LocalizedError {
             "The reference thumbnail for \(name) could not be found."
         case .modelRefreshFailed:
             "Could not refresh image models from the API."
-        case .missingAdLocalizationFolder:
-            "Choose the folder that contains the static ads to localize."
-        case .missingAdLocalizationLanguages:
-            "Choose at least one language + currency market for ad localization."
-        case .emptyAdLocalizationFolder:
-            "The selected folder does not contain supported image files."
         case .requestTimedOut:
             "Request timed out. Large image generations can take a while, especially at higher quality or with multiple images."
         case .networkConnectionLost:
@@ -487,21 +477,14 @@ final class AppPreferencesStore {
 
 final class OpenAIImageService: Sendable {
     private static let requestTimeout: TimeInterval = 1_200
-    private static let visionQCModels = ["gpt-6-luna", "gpt-6.2-astra"]
     private static let logger = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "Soundbrenner Pixel",
+        subsystem: Bundle.main.bundleIdentifier ?? "Mediaforge",
         category: "OpenAI"
     )
 
-    func fetchAvailableImageModels(apiKey: String) async throws -> [ImageModelOption] {
-        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw AppError.missingAPIKey
-        }
-
+    func fetchAvailableImageModels(credential: GenerationCredential) async throws -> [ImageModelOption] {
         Self.logger.debug("Refreshing image models from /v1/models")
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/models")!)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        let request = try credential.openAIRequest("v1/models", method: "GET")
 
         let session = Self.makeSession()
         let (data, response) = try await session.data(for: request)
@@ -541,196 +524,25 @@ final class OpenAIImageService: Sendable {
         ImageModelOption(id: "gpt-image-1-mini")
     ]
 
-    func generateImages(apiKey: String, form: GenerationForm, referenceImageURLs: [URL]) async throws -> [GeneratedImagePayload] {
-        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw AppError.missingAPIKey
-        }
-
+    func generateImages(credential: GenerationCredential, form: GenerationForm, referenceImageURLs: [URL]) async throws -> [GeneratedImagePayload] {
         guard !form.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AppError.missingPrompt
         }
 
         if referenceImageURLs.isEmpty {
-            return try await generateFromPrompt(apiKey: apiKey, form: form)
+            return try await generateFromPrompt(credential: credential, form: form)
         }
 
-        return try await generateWithReferences(apiKey: apiKey, form: form, referenceImageURLs: referenceImageURLs)
+        return try await generateWithReferences(credential: credential, form: form, referenceImageURLs: referenceImageURLs)
     }
 
-    func editImage(
-        apiKey: String,
-        imageURL: URL,
-        prompt: String,
-        model: String,
-        quality: ImageQuality,
-        size: String,
-        outputFormat: OutputFormat,
-        moderation: ModerationLevel
-    ) async throws -> GeneratedImagePayload {
-        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw AppError.missingAPIKey
-        }
-
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw AppError.missingPrompt
-        }
-
-        let boundary = "Boundary-\(UUID().uuidString)"
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/images/edits")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.setValue("", forHTTPHeaderField: "Expect")
-        request.httpBody = try buildMultipartBody(
-            model: model,
-            prompt: prompt,
-            size: size,
-            quality: quality,
-            imageCount: 1,
-            outputFormat: outputFormat,
-            outputCompression: nil,
-            moderation: moderation,
-            referenceImageURLs: [imageURL],
-            boundary: boundary
-        )
-        request.timeoutInterval = Self.requestTimeout
-
-        let (data, response) = try await perform(request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw AppError.invalidResponse
-        }
-
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            let message = try? JSONDecoder().decode(OpenAIAPIErrorEnvelope.self, from: data)
-            throw AppError.apiError(message?.error.message ?? "Reference-image generation failed with status \(httpResponse.statusCode).")
-        }
-
-        let decoded = try JSONDecoder().decode(OpenAIImageGenerationResponse.self, from: data)
-        guard let item = decoded.data.first,
-              let imageData = Data(base64Encoded: item.b64JSON) else {
-            throw AppError.invalidImageData
-        }
-
-        return GeneratedImagePayload(data: imageData, format: outputFormat)
-    }
-
-    fileprivate func analyzeAdLocalizationSource(
-        apiKey: String,
-        imageURL: URL,
-        language: AdLocalizationLanguage,
-        truthContext: String?
-    ) async throws -> AdLocalizationSourceIntent {
-        let prompt = """
-        Analyze this source Meta ad before localization.
-
-        Return JSON only. Identify what is visibly present in the source ad; do not infer hidden offers.
-
-        Target: \(language.title)
-
-        Live truth context for product names and prices:
-        \(truthContext ?? "No live truth context available.")
-
-        Required JSON shape:
-        {
-          "detectedProduct": "soundbrenner-wave-pro-in-ear-monitors or unknown",
-          "visibleOfferType": "none|amount_off|discount_percent|price|price_compare_at|shipping|mixed",
-          "visiblePriceFields": ["all visible price or savings strings, e.g. $349, $199, SAVE 150 USD, $15, $39, $9"],
-          "visibleDiscountPercentFields": ["all visible percentage-off strings, e.g. 43% OFF, UP TO 43% OFF, 43% OFF SITE WIDE"],
-          "visibleComponentPriceFields": ["only itemized bundle/accessory/component prices, e.g. $15, $39, $9"],
-          "hasVisiblePrice": true,
-          "hasCompareAtPrice": false,
-          "hasAmountOffClaim": true,
-          "hasDiscountPercentClaim": false,
-          "hasShippingClaim": true,
-          "hasShippingThreshold": false,
-          "notes": ["short factual observations"]
-        }
-        """
-
-        return try await performVisionJSONRequest(
-            apiKey: apiKey,
-            prompt: prompt,
-            imagePayloads: [try imagePayload(url: imageURL)],
-            responseType: AdLocalizationSourceIntent.self
-        )
-    }
-
-    fileprivate func validateAdLocalizationOutput(
-        apiKey: String,
-        sourceURL: URL,
-        outputData: Data,
-        language: AdLocalizationLanguage,
-        truthContext: String?,
-        sourceIntent: AdLocalizationSourceIntent
-    ) async throws -> AdLocalizationQCResult {
-        let intentData = try JSONEncoder().encode(sourceIntent)
-        let intentText = String(data: intentData, encoding: .utf8) ?? "{}"
-        let prompt = """
-        Quality-check this localized ad image.
-
-        You receive two images:
-        1. Source ad
-        2. Localized output ad
-
-        Return JSON only:
-        {
-          "pass": true,
-          "errors": [],
-          "notes": ["short notes"]
-        }
-
-        Source intent JSON:
-        \(intentText)
-
-        Target: \(language.title)
-
-        Live truth context:
-        \(truthContext ?? "No live truth context available.")
-
-        Fail the output if any of these are true:
-        - It added a compare-at/original price when sourceIntent.hasCompareAtPrice is false.
-        - It added a product price when sourceIntent.hasVisiblePrice is false and the source only had a percent discount or amount-off claim.
-        - It added an amount-off claim when sourceIntent.hasAmountOffClaim is false.
-        - It has an amount-off claim but the number/currency does not match the selected product's marketing amount-off display in the live truth context.
-        - It has a percent-off claim but the percentage does not match the percent-off truth in the live truth context.
-        - It has a percent-off claim in a non-English target and leaves English percentage-off wording such as "OFF", "off", "SITE WIDE", or "SALE" visible. The number and % sign may remain, but the surrounding offer words must be localized.
-        - It adds a percent-off claim when sourceIntent.hasDiscountPercentClaim is false.
-        - It leaves an itemized bundle component or accessory price in USD when the live truth context provides an exact component price match for that USD amount.
-        - It changes a component/accessory line from FREE to a paid price, or removes FREE when FREE is visible in the source.
-        - It keeps the source USD amount in an English non-US target market. Example: fail "$150 OFF" for English + CAD when the live truth context says marketing amount-off CA$230.
-        - It omits the target-market currency marker for an amount-off claim when the truth context includes one, such as CA$, AU$, £, €, ¥, or ₩.
-        - It added shipping text when sourceIntent.hasShippingClaim is false.
-        - It added a shipping threshold when sourceIntent.hasShippingThreshold is false.
-        - It uses USD text, "US$," or a bare "$" amount in a non-USD target market. For CAD and AUD, CA$ and AU$ are allowed and should be required when the truth context uses them.
-        - It formats Japanese yen or Korean won with broken digit grouping, such as misplaced commas or four trailing zeroes after a comma.
-        - It uses formal German address such as Sie, Ihnen, Ihr, Ihre for German.
-        - It changes the offer structure instead of replacing existing visible claims.
-        - It mistranslates obvious CTA/UI text.
-        - It leaves major English offer copy visible when the target language is not English.
-
-        Do not fail for small visual differences that are normal in image generation. Focus on semantic ad-copy and offer mistakes.
-        """
-
-        return try await performVisionJSONRequest(
-            apiKey: apiKey,
-            prompt: prompt,
-            imagePayloads: [
-                try imagePayload(url: sourceURL),
-                imagePayload(data: outputData, mimeType: "image/png")
-            ],
-            responseType: AdLocalizationQCResult.self
-        )
-    }
-
-    private func generateFromPrompt(apiKey: String, form: GenerationForm) async throws -> [GeneratedImagePayload] {
+    private func generateFromPrompt(credential: GenerationCredential, form: GenerationForm) async throws -> [GeneratedImagePayload] {
         let body = form.requestBody
 
         Self.logger.debug(
             "Starting prompt image generation with model \(form.imageModel, privacy: .public), quality \(form.quality.rawValue, privacy: .public), size \(form.resolution.sizeValue, privacy: .public), count \(form.sanitizedImageCount)"
         )
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/images/generations")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        var request = try credential.openAIRequest("v1/images/generations", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
         request.timeoutInterval = Self.requestTimeout
@@ -761,14 +573,12 @@ final class OpenAIImageService: Sendable {
         return payloads
     }
 
-    private func generateWithReferences(apiKey: String, form: GenerationForm, referenceImageURLs: [URL]) async throws -> [GeneratedImagePayload] {
+    private func generateWithReferences(credential: GenerationCredential, form: GenerationForm, referenceImageURLs: [URL]) async throws -> [GeneratedImagePayload] {
         let boundary = "Boundary-\(UUID().uuidString)"
         Self.logger.debug(
             "Starting reference image generation with model \(form.imageModel, privacy: .public), quality \(form.quality.rawValue, privacy: .public), size \(form.resolution.sizeValue, privacy: .public), refs \(referenceImageURLs.count)"
         )
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/images/edits")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        var request = try credential.openAIRequest("v1/images/edits", method: "POST")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.setValue("", forHTTPHeaderField: "Expect")
         request.httpBody = try buildMultipartBody(form: form, referenceImageURLs: referenceImageURLs, boundary: boundary)
@@ -897,108 +707,13 @@ final class OpenAIImageService: Sendable {
         }
     }
 
-    private func performVisionJSONRequest<T: Decodable>(
-        apiKey: String,
-        prompt: String,
-        imagePayloads: [[String: Any]],
-        responseType: T.Type
-    ) async throws -> T {
-        var lastError: Error?
-        for model in Self.visionQCModels {
-            do {
-                return try await performVisionJSONRequest(
-                    apiKey: apiKey,
-                    model: model,
-                    prompt: prompt,
-                    imagePayloads: imagePayloads,
-                    responseType: responseType
-                )
-            } catch {
-                lastError = error
-                if case AppError.apiError(let message) = error,
-                   message.localizedCaseInsensitiveContains("model") {
-                    continue
-                }
-                throw error
-            }
-        }
-        throw lastError ?? AppError.invalidResponse
-    }
-
-    private func performVisionJSONRequest<T: Decodable>(
-        apiKey: String,
-        model: String,
-        prompt: String,
-        imagePayloads: [[String: Any]],
-        responseType: T.Type
-    ) async throws -> T {
-        var content: [[String: Any]] = [["type": "text", "text": prompt]]
-        content.append(contentsOf: imagePayloads.map { payload in
-            ["type": "image_url", "image_url": payload]
-        })
-
-        var body: [String: Any] = [
-            "model": model,
-            "messages": [
-                [
-                    "role": "system",
-                    "content": "You are a strict localization QA reviewer for consumer electronics Meta ads. Return valid JSON only."
-                ],
-                [
-                    "role": "user",
-                    "content": content
-                ]
-            ],
-            "response_format": ["type": "json_object"]
-        ]
-        if model.hasPrefix("gpt-5") || model.hasPrefix("gpt-6") {
-            body["reasoning_effort"] = "low"
-        } else {
-            body["temperature"] = 0
-        }
-
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        request.timeoutInterval = Self.requestTimeout
-
-        let (data, response) = try await perform(request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw AppError.invalidResponse
-        }
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            let message = try? JSONDecoder().decode(OpenAIAPIErrorEnvelope.self, from: data)
-            throw AppError.apiError(message?.error.message ?? "Vision QC failed with status \(httpResponse.statusCode).")
-        }
-
-        let decoded = try JSONDecoder().decode(OpenAIChatCompletionResponse.self, from: data)
-        guard let content = decoded.choices.first?.message.content,
-              let jsonData = content.data(using: .utf8) else {
-            throw AppError.invalidResponse
-        }
-        return try JSONDecoder().decode(responseType, from: jsonData)
-    }
-
-    private func imagePayload(url: URL) throws -> [String: Any] {
-        let data = try Data(contentsOf: url)
-        return imagePayload(data: data, mimeType: mimeTypeForFileExtension(url.pathExtension))
-    }
-
-    private func imagePayload(data: Data, mimeType: String) -> [String: Any] {
-        [
-            "url": "data:\(mimeType);base64,\(data.base64EncodedString())"
-        ]
-    }
-
     private static func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = requestTimeout
         configuration.timeoutIntervalForResource = requestTimeout
         configuration.waitsForConnectivity = true
         configuration.httpShouldUsePipelining = false
-        return URLSession(configuration: configuration)
+        return URLSession(configuration: configuration, delegate: MediaforgeNoRedirectDelegate(), delegateQueue: nil)
     }
 }
 
@@ -1007,7 +722,7 @@ final class GeminiImageService: Sendable {
     private static let requestTimeout: TimeInterval = 1_200
     private static let maximumReferenceImageCount = 14
     private static let logger = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "Soundbrenner Pixel",
+        subsystem: Bundle.main.bundleIdentifier ?? "Mediaforge",
         category: "Gemini"
     )
 
@@ -1247,1332 +962,48 @@ private struct OpenAIModelRecord: Decodable {
     let id: String
 }
 
-private struct OpenAIChatCompletionResponse: Decodable {
-    let choices: [Choice]
-
-    struct Choice: Decodable {
-        let message: Message
-    }
-
-    struct Message: Decodable {
-        let content: String?
-    }
-}
-
-private struct AdLocalizationSourceIntent: Codable, Hashable {
-    let detectedProduct: String
-    let visibleOfferType: String
-    let visiblePriceFields: [String]
-    let visibleDiscountPercentFields: [String]
-    let visibleComponentPriceFields: [String]
-    let hasVisiblePrice: Bool
-    let hasCompareAtPrice: Bool
-    let hasAmountOffClaim: Bool
-    let hasDiscountPercentClaim: Bool
-    let hasShippingClaim: Bool
-    let hasShippingThreshold: Bool
-    let notes: [String]
-
-    static let fallback = AdLocalizationSourceIntent(
-        detectedProduct: "unknown",
-        visibleOfferType: "unknown",
-        visiblePriceFields: [],
-        visibleDiscountPercentFields: [],
-        visibleComponentPriceFields: [],
-        hasVisiblePrice: false,
-        hasCompareAtPrice: false,
-        hasAmountOffClaim: false,
-        hasDiscountPercentClaim: false,
-        hasShippingClaim: false,
-        hasShippingThreshold: false,
-        notes: ["Source intent analysis unavailable."]
-    )
-
-    enum CodingKeys: String, CodingKey {
-        case detectedProduct
-        case visibleOfferType
-        case visiblePriceFields
-        case visibleDiscountPercentFields
-        case visibleComponentPriceFields
-        case hasVisiblePrice
-        case hasCompareAtPrice
-        case hasAmountOffClaim
-        case hasDiscountPercentClaim
-        case hasShippingClaim
-        case hasShippingThreshold
-        case notes
-    }
-
-    init(
-        detectedProduct: String,
-        visibleOfferType: String,
-        visiblePriceFields: [String],
-        visibleDiscountPercentFields: [String],
-        visibleComponentPriceFields: [String],
-        hasVisiblePrice: Bool,
-        hasCompareAtPrice: Bool,
-        hasAmountOffClaim: Bool,
-        hasDiscountPercentClaim: Bool,
-        hasShippingClaim: Bool,
-        hasShippingThreshold: Bool,
-        notes: [String]
-    ) {
-        self.detectedProduct = detectedProduct
-        self.visibleOfferType = visibleOfferType
-        self.visiblePriceFields = visiblePriceFields
-        self.visibleDiscountPercentFields = visibleDiscountPercentFields
-        self.visibleComponentPriceFields = visibleComponentPriceFields
-        self.hasVisiblePrice = hasVisiblePrice
-        self.hasCompareAtPrice = hasCompareAtPrice
-        self.hasAmountOffClaim = hasAmountOffClaim
-        self.hasDiscountPercentClaim = hasDiscountPercentClaim
-        self.hasShippingClaim = hasShippingClaim
-        self.hasShippingThreshold = hasShippingThreshold
-        self.notes = notes
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        detectedProduct = try container.decodeIfPresent(String.self, forKey: .detectedProduct) ?? "unknown"
-        visibleOfferType = try container.decodeIfPresent(String.self, forKey: .visibleOfferType) ?? "unknown"
-        visiblePriceFields = try container.decodeIfPresent([String].self, forKey: .visiblePriceFields) ?? []
-        visibleDiscountPercentFields = try container.decodeIfPresent([String].self, forKey: .visibleDiscountPercentFields) ?? []
-        visibleComponentPriceFields = try container.decodeIfPresent([String].self, forKey: .visibleComponentPriceFields) ?? []
-        hasVisiblePrice = try container.decodeIfPresent(Bool.self, forKey: .hasVisiblePrice) ?? false
-        hasCompareAtPrice = try container.decodeIfPresent(Bool.self, forKey: .hasCompareAtPrice) ?? false
-        hasAmountOffClaim = try container.decodeIfPresent(Bool.self, forKey: .hasAmountOffClaim) ?? false
-        hasDiscountPercentClaim = try container.decodeIfPresent(Bool.self, forKey: .hasDiscountPercentClaim) ?? false
-        hasShippingClaim = try container.decodeIfPresent(Bool.self, forKey: .hasShippingClaim) ?? false
-        hasShippingThreshold = try container.decodeIfPresent(Bool.self, forKey: .hasShippingThreshold) ?? false
-        notes = try container.decodeIfPresent([String].self, forKey: .notes) ?? []
-    }
-
-    var promptContext: String {
-        """
-        Source intent detected by vision QC:
-        - Product: \(detectedProduct)
-        - Visible offer type: \(visibleOfferType)
-        - Visible price fields: \(visiblePriceFields.isEmpty ? "none" : visiblePriceFields.joined(separator: " | "))
-        - Visible percent-off fields: \(visibleDiscountPercentFields.isEmpty ? "none" : visibleDiscountPercentFields.joined(separator: " | "))
-        - Visible component/accessory price fields: \(visibleComponentPriceFields.isEmpty ? "none" : visibleComponentPriceFields.joined(separator: " | "))
-        - Has visible product price: \(hasVisiblePrice ? "yes" : "no")
-        - Has compare-at/original price: \(hasCompareAtPrice ? "yes" : "no")
-        - Has amount-off claim: \(hasAmountOffClaim ? "yes" : "no")
-        - Has discount-percent claim: \(hasDiscountPercentClaim ? "yes" : "no")
-        - Has shipping claim: \(hasShippingClaim ? "yes" : "no")
-        - Has shipping threshold: \(hasShippingThreshold ? "yes" : "no")
-        - Notes: \(notes.isEmpty ? "none" : notes.joined(separator: " | "))
-        """
-    }
-
-    var hasCurrencySpecificLocalizationNeed: Bool {
-        hasVisiblePrice
-            || hasCompareAtPrice
-            || hasAmountOffClaim
-            || hasDiscountPercentClaim
-            || hasShippingThreshold
-            || !visiblePriceFields.isEmpty
-            || !visibleDiscountPercentFields.isEmpty
-            || !visibleComponentPriceFields.isEmpty
-    }
-}
-
-private struct AdLocalizationQCResult: Decodable, Hashable {
-    let pass: Bool
-    let errors: [String]
-    let notes: [String]?
-}
-
-private struct AdLocalizationQCFailure: LocalizedError {
-    let errors: [String]
-
-    var errorDescription: String? {
-        guard !errors.isEmpty else {
-            return "Localized ad failed semantic QC."
-        }
-        return "Localized ad failed semantic QC: \(errors.joined(separator: "; "))"
-    }
-}
-
-private enum AdLocalizationRunResult {
-    case generated(GeneratedImagePayload)
-    case skipped(String)
-}
-
-private struct AdLocalizationTruthPacket {
-    let fetchedAt: Date
-    let selectedProduct: AdLocalizationProduct
-    let articleURL: String?
-    let articleURLMatched: Bool
-    let articles: AudioChronicleArticleIndex
-    let pricesByMarket: [AdLocalizationLanguage: SoundbrennerPriceResponse]
-    let discountByMarket: [AdLocalizationLanguage: AdLocalizationDiscountInfo]
-    let componentPriceMatchesByMarket: [AdLocalizationLanguage: [AdLocalizationComponentPriceMatch]]
-    let shippingByMarket: [AdLocalizationLanguage: AdLocalizationShippingInfo]
-
-    func promptContext(
-        for market: AdLocalizationLanguage,
-        componentPriceFields: [String] = [],
-        includeComponentPriceMatches: Bool = true
-    ) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        var lines: [String] = [
-            "Live localization truth packet fetched at \(formatter.string(from: fetchedAt)).",
-            "Target market: \(market.title). Target locale: \(market.localeName). Target currency: \(market.currencyCode).",
-            selectedProduct == .none
-                ? "Selected product for this run: None. No product price or savings truth was selected."
-                : "Selected product for this run: \(selectedProduct.productName). Use only this product's price truth.",
-            selectedProduct == .none
-                ? "If the source image contains product prices or savings, preserve the source offer text rather than inventing localized price truth."
-                : "If the source image appears to advertise a different product, preserve the source offer text rather than borrowing another product's price.",
-            "",
-            "Price truth:",
-            "- Use these exact current prices only when the source image already contains a visible price, amount-off claim, compare-at price, sale price, or discount claim.",
-            "- Replace old source-image currency amounts with the target-market values below when the product clearly matches, but keep the same offer structure as the source.",
-            "- If the source image has an amount-off claim such as \"$150 off\", use the target-market marketing amount-off display below exactly. It is derived from local compare/base price minus local discounted price and rounded down to a clean safe marketing value.",
-            "- Source ads are normally authored in USD. For non-US target markets, never keep the original USD amount just because the copy is already English. For example, if the truth packet says marketing amount-off CA$230, visible text like \"$150 OFF\" is wrong.",
-            "- If the source image has a percent-off claim such as \"43% off\" or \"up to 43% off\", use the percent-off truth below exactly.",
-            "- When phrase guidance uses {percent}, replace it with the live numeric percent from the Percent-off truth section. Never print {percent} literally.",
-            "- For non-English targets, localize the percentage-off words too. Keep the numeric percentage accurate, but never leave English wording like \"OFF\", \"off\", \"SITE WIDE\", or \"SALE\" around a percent claim unless it is part of a brand name or promo code.",
-            "- Do not add a compare-at/original price unless the source image already shows a compare-at/original price.",
-            "- Do not add an amount-off claim unless the source image already shows an amount-off claim.",
-            "- If the source image contains a price for an unknown product, preserve it rather than inventing a conversion."
-        ]
-
-        if selectedProduct == .none {
-            lines.append("- No product selected. Preserve source prices and savings; do not localize product price or savings amounts.")
-        } else if let prices = pricesByMarket[market] {
-            lines.append(contentsOf: prices.promptLines)
-        } else {
-            lines.append("- No live price payload was available for this market. Preserve any existing product prices.")
-        }
-
-        lines.append("")
-        lines.append("Percent-off truth:")
-        lines.append("- Use percent-off data only when the source image already contains a visible percent-off claim.")
-        if let discount = discountByMarket[market] {
-            lines.append(contentsOf: discount.promptLines)
-        } else {
-            lines.append("- No live percent-off payload was available for this market. Preserve any existing percent-off claims.")
-        }
-
-        lines.append("")
-        lines.append("Component price truth:")
-        lines.append("- Use these USD-to-local Shopify price matches only for itemized bundle components, accessories, struck-through component prices, or small line-item prices in the source image.")
-        lines.append("- If multiple Shopify items share the same USD price, Pixel uses the first stable match. This is intentionally better than leaving a visible component price in USD.")
-        lines.append("- Do not use component price matches for the main selected product price, sale price, compare-at price, amount-off claim, or percent-off claim.")
-        let filteredMatches = includeComponentPriceMatches
-            ? componentPriceMatches(for: market, matching: componentPriceFields)
-            : []
-        if !includeComponentPriceMatches {
-            lines.append("- Component price matches are withheld during source analysis. First classify visible component prices from the source image.")
-        } else if componentPriceFields.isEmpty {
-            lines.append("- No component/accessory price fields were detected in source analysis. Do not localize component line-item prices.")
-        } else if !filteredMatches.isEmpty {
-            lines.append(contentsOf: filteredMatches.map(\.promptLine))
-        } else {
-            lines.append("- No Shopify component price matches were available for detected source component prices: \(componentPriceFields.joined(separator: " | ")). Preserve those component line-item prices rather than guessing.")
-        }
-
-        lines.append("")
-        lines.append("Shipping truth:")
-        lines.append("- Use shipping data only when the source image already contains a visible shipping claim.")
-        lines.append("- Do not add a shipping threshold unless the source image already shows a threshold-style shipping claim.")
-        if let shipping = shippingByMarket[market] {
-            lines.append(contentsOf: shipping.promptLines(for: market))
-        } else {
-            lines.append("- No live shipping-threshold payload was available for this market. Do not invent a free-shipping threshold.")
-        }
-
-        let localizedArticles = articles.promptLines(for: market.languageCode)
-        lines.append("")
-        lines.append("Audio Chronicle article title truth:")
-        if let articleURL, !articleURL.isEmpty {
-            lines.append("- Audio Chronicle link selected for this run: \(articleURL).")
-            lines.append("- If visible ad text mentions this article title, URL, slug, or close variant from the match strings below, use the exact localized title and URL for \(market.localeName).")
-            lines.append("- Do not translate Audio Chronicle article names freely when a canonical localized title is supplied.")
-            if !articleURLMatched {
-                lines.append("- Warning: the selected Audio Chronicle link did not match the article index. Preserve visible article titles rather than inventing localized article names.")
-            }
-        } else {
-            lines.append("- No Audio Chronicle link was selected for this run.")
-            lines.append("- Do not invent or freely translate Audio Chronicle article titles. Preserve visible article titles unless they are ordinary ad copy.")
-        }
-        lines.append(contentsOf: localizedArticles)
-
-        return lines.joined(separator: "\n")
-    }
-
-    private func componentPriceMatches(
-        for market: AdLocalizationLanguage,
-        matching componentPriceFields: [String]
-    ) -> [AdLocalizationComponentPriceMatch] {
-        guard let matches = componentPriceMatchesByMarket[market], !matches.isEmpty else {
-            return []
-        }
-        let detectedCents = Set(componentPriceFields.flatMap(Self.usdCentAmounts(in:)))
-        guard !detectedCents.isEmpty else {
-            return []
-        }
-        return matches.filter { match in
-            !Set(Self.usdCentAmounts(in: match.sourceUSDDisplay)).isDisjoint(with: detectedCents)
-        }
-    }
-
-    private static func usdCentAmounts(in value: String) -> [Int] {
-        let pattern = #"(?i)(?:US\$|\$|USD\s*)(\d+(?:[,.]\d{1,2})?)|(\d+(?:[,.]\d{1,2})?)\s*USD"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return []
-        }
-        let nsRange = NSRange(value.startIndex..<value.endIndex, in: value)
-        return regex.matches(in: value, range: nsRange).compactMap { match in
-            for index in 1..<match.numberOfRanges {
-                let range = match.range(at: index)
-                guard range.location != NSNotFound,
-                      let swiftRange = Range(range, in: value) else {
-                    continue
-                }
-                let rawAmount = value[swiftRange].replacingOccurrences(of: ",", with: ".")
-                if let amount = Double(rawAmount) {
-                    return Int((amount * 100).rounded())
-                }
-            }
-            return nil
-        }
-    }
-}
-
-private struct AdLocalizationShippingInfo {
-    var countryCode: String
-    var shipsToCountry: Bool
-    var hasFreeShipping: Bool
-    var threshold: Double?
-    var currency: String
-    var advertisedMinTime: String?
-    var advertisedMaxTime: String?
-
-    func promptLines(for market: AdLocalizationLanguage) -> [String] {
-        var lines = [
-            "- Ships to \(countryCode): \(shipsToCountry ? "yes" : "no").",
-            "- Free shipping available: \(hasFreeShipping ? "yes" : "no")."
-        ]
-
-        if let threshold {
-            lines.append("- Free shipping threshold: \(formatAmount(threshold, currency: currency, market: market)).")
-        } else if hasFreeShipping {
-            lines.append("- Free shipping threshold: none returned by Shopify. Mention free shipping only when the source ad already does.")
-        }
-
-        if let advertisedMinTime, let advertisedMaxTime, !advertisedMinTime.isEmpty, !advertisedMaxTime.isEmpty {
-            lines.append("- Advertised delivery window: \(advertisedMinTime)-\(advertisedMaxTime).")
-        }
-
-        return lines
-    }
-
-    private func formatAmount(_ amount: Double, currency: String, market: AdLocalizationLanguage) -> String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .currency
-        formatter.currencyCode = currency
-        formatter.maximumFractionDigits = 0
-        formatter.locale = Locale(identifier: market.localeIdentifier)
-        return formatter.string(from: NSNumber(value: amount.rounded())) ?? "\(currency) \(Int(amount.rounded()))"
-    }
-}
-
-private struct AdLocalizationDiscountInfo {
-    var sitewidePercentage: Double
-    var maxAdvertisedPercentage: Double
-    var maxAdvertisedProductName: String?
-    var generatedAt: String?
-    var syncedAt: String?
-
-    var promptLines: [String] {
-        var lines = [
-            "- Sitewide discount snapshot: \(percentText(sitewidePercentage)).",
-            "- Maximum advertised percent-off claim: \(percentText(maxAdvertisedPercentage))\(maxAdvertisedProductName.map { " from \($0)" } ?? "")."
-        ]
-
-        if let generatedAt, !generatedAt.isEmpty {
-            lines.append("- Discount snapshot generated at: \(generatedAt).")
-        }
-        if let syncedAt, !syncedAt.isEmpty {
-            lines.append("- Discount snapshot synced at: \(syncedAt).")
-        }
-
-        return lines
-    }
-
-    private func percentText(_ value: Double) -> String {
-        let rounded = value.rounded()
-        if abs(value - rounded) < 0.05 {
-            return "\(Int(rounded))%"
-        }
-        return "\(value.formatted(.number.precision(.fractionLength(1))))%"
-    }
-}
-
-private struct AdLocalizationComponentPriceMatch {
-    var sourceUSDDisplay: String
-    var targetDisplay: String
-    var exampleTitles: [String]
-
-    var promptLine: String {
-        let examples = exampleTitles.prefix(3).joined(separator: " | ")
-        return "- \(sourceUSDDisplay) -> \(targetDisplay)\(examples.isEmpty ? "" : " [matches: \(examples)]")"
-    }
-}
-
-private struct AudioChronicleArticleIndex: Decodable {
-    let generatedAt: String?
-    let articleCount: Int?
-    let articles: [Article]
-
-    struct Article: Decodable {
-        let slug: String
-        let sourcePath: String
-        let canonicalUrl: String
-        let published: Bool?
-        let category: String?
-        let heroProduct: String?
-        let secondaryHeroProduct: String?
-        let locales: [String: LocaleRecord]
-        let matchStrings: [String]
-    }
-
-    struct LocaleRecord: Decodable {
-        let locale: String
-        let title: String
-        let seoTitle: String?
-        let subtitle: String?
-        let path: String
-        let url: String
-    }
-
-    func promptLines(for languageCode: String) -> [String] {
-        let records = articles.compactMap { article -> String? in
-            guard let localized = article.locales[languageCode] ?? article.locales["en"] else {
-                return nil
-            }
-            let matches = article.matchStrings
-                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                .prefix(5)
-                .joined(separator: " | ")
-            return "- \(localized.title) -> \(localized.url) [matches: \(matches)]"
-        }
-
-        if records.isEmpty {
-            return ["- No localized article records available for \(languageCode)."]
-        }
-
-        return Array(records.prefix(80))
-    }
-
-    func scoped(to rawURL: String?) -> (index: AudioChronicleArticleIndex, matched: Bool) {
-        let normalizedNeedles = normalizedURLNeedles(from: rawURL)
-        guard !normalizedNeedles.isEmpty else {
-            return (AudioChronicleArticleIndex(generatedAt: generatedAt, articleCount: 0, articles: []), false)
-        }
-
-        let matches = articles.filter { article in
-            let haystack = ([article.slug, article.sourcePath, article.canonicalUrl] + article.matchStrings + article.locales.values.flatMap { [$0.path, $0.url] })
-                .flatMap { normalizedURLNeedles(from: $0) }
-            return normalizedNeedles.contains { needle in
-                haystack.contains(needle) || haystack.contains { $0.contains(needle) || needle.contains($0) }
-            }
-        }
-
-        return (
-            AudioChronicleArticleIndex(generatedAt: generatedAt, articleCount: matches.count, articles: matches),
-            !matches.isEmpty
-        )
-    }
-
-    private func normalizedURLNeedles(from rawValue: String?) -> Set<String> {
-        guard let rawValue else {
-            return []
-        }
-        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return []
-        }
-
-        var values: Set<String> = [trimmed.lowercased()]
-        if let components = URLComponents(string: trimmed) {
-            let path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
-            if !path.isEmpty {
-                values.insert(path)
-                values.insert("/\(path)")
-                if let slug = path.split(separator: "/").last {
-                    values.insert(String(slug))
-                }
-            }
-        } else if let slug = trimmed.split(separator: "/").last {
-            values.insert(String(slug).lowercased())
-        }
-
-        return values
-            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
-            .filter { !$0.isEmpty }
-            .reduce(into: Set<String>()) { $0.insert($1) }
-    }
-}
-
-private struct SoundbrennerPriceResponse: Decodable {
-    let country: String
-    let market: String
-    let currency: String
-    let generatedAt: String?
-    let ratesFetchedAt: String?
-    let pricesByProductId: [String: ProductPrice]
-
-    struct ProductPrice: Decodable {
-        let productId: String?
-        let currency: String
-        let amount: Double
-        let display: String
-        let compareAtAmount: Double?
-        let compareAtDisplay: String?
-        let discountPercentage: Double?
-        let marketingAmountOffDisplay: String?
-        let source: String?
-        let exact: Bool?
-        let stale: Bool?
-        let fetchedAt: String?
-    }
-
-    var promptLines: [String] {
-        guard !pricesByProductId.isEmpty else {
-            return ["- No product prices returned for \(market)/\(country)."]
-        }
-
-        let namesByProductID = [
-            "soundbrenner-wave-in-ear-monitors": "Soundbrenner Wave",
-            "soundbrenner-wave-pro-in-ear-monitors": "Soundbrenner Wave Pro",
-            "soundbrenner-spark-music-practice-companion": "Soundbrenner Spark",
-            "soundbrenner-pulse-vibrating-metronome": "Soundbrenner Pulse"
-        ]
-
-        return pricesByProductId
-            .sorted { $0.key < $1.key }
-            .map { productID, price in
-                let name = namesByProductID[productID] ?? productID
-                let compareAtText = price.compareAtDisplay.map { ", compare-at \( $0 )" } ?? ""
-                let discountText = price.discountPercentage.map { ", discount \(Int($0.rounded()))%" } ?? ""
-                let amountOffText = (price.marketingAmountOffDisplay ?? price.marketingAmountOffText).map { ", marketing amount-off \($0)" } ?? ""
-                return "- \(name): current \(price.display)\(compareAtText)\(discountText)\(amountOffText), currency \(price.currency), source \(price.source ?? "unknown")."
-            }
-    }
-
-    static func marketingAmountOff(_ amount: Double, currency: String) -> Double {
-        let roundedDown: Double
-        switch currency {
-        case "JPY":
-            roundedDown = floor(amount / 1_000) * 1_000
-        case "KRW":
-            roundedDown = floor(amount / 10_000) * 10_000
-        case "USD", "GBP", "EUR", "AUD", "CAD":
-            roundedDown = amount >= 100 ? floor(amount / 10) * 10 : floor(amount)
-        default:
-            roundedDown = amount >= 100 ? floor(amount / 10) * 10 : floor(amount)
-        }
-        return max(roundedDown, 0)
-    }
-
-    private static func marketingAmountOffText(amount: Double, currency: String) -> String? {
-        let marketingAmount = marketingAmountOff(amount, currency: currency)
-        guard marketingAmount > 0 else {
-            return nil
-        }
-        return "\(Int(marketingAmount.rounded())) \(currency)"
-    }
-}
-
-private extension SoundbrennerPriceResponse.ProductPrice {
-    var marketingAmountOffText: String? {
-        guard let compareAtAmount, compareAtAmount > amount else {
-            return nil
-        }
-        return SoundbrennerPriceResponse.marketingAmountOffText(
-            amount: compareAtAmount - amount,
-            currency: currency
-        )
-    }
-}
-
-private struct ShopifyCredentials {
-    var storeDomain: String
-    var clientID: String
-    var clientSecret: String
-    var apiVersion: String
-
-    var normalizedStoreDomain: String {
-        storeDomain
-            .replacingOccurrences(of: "https://", with: "")
-            .replacingOccurrences(of: "http://", with: "")
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-    }
-}
-
-private final class ShopifyCredentialsStore {
-    func read() -> ShopifyCredentials? {
-        let storeDomain = readKeychainValue(service: "codex-shopify-store-domain")
-        let clientID = readKeychainValue(service: "codex-shopify-client-id")
-        let clientSecret = readKeychainValue(service: "codex-shopify-client-secret")
-        let apiVersion = readKeychainValue(service: "codex-shopify-api-version")
-
-        guard !storeDomain.isEmpty,
-              !clientID.isEmpty,
-              !clientSecret.isEmpty else {
-            return nil
-        }
-
-        return ShopifyCredentials(
-            storeDomain: storeDomain,
-            clientID: clientID,
-            clientSecret: clientSecret,
-            apiVersion: apiVersion.isEmpty ? "2026-04" : apiVersion
-        )
-    }
-
-    private func readKeychainValue(service: String) -> String {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: NSUserName(),
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess,
-              let data = item as? Data,
-              let value = String(data: data, encoding: .utf8) else {
-            return ""
-        }
-
-        return value.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-}
-
-private struct ShopifyDiscountSnapshot {
-    var generatedAt: String?
-    var syncedAt: String?
-    var sitewidePercentage: Double
-    var productPercentagesById: [String: Double]
-}
-
-private struct ShopifyProductDefinition {
-    var productID: String
-    var name: String
-    var shopifyProductID: String
-}
-
-private struct ShopifyAdminProductPrice {
-    var productID: String
-    var name: String
-    var productLegacyID: String?
-    var amount: Double
-    var currency: String
-    var compareAtAmount: Double?
-}
-
-private struct ShopifyGraphQLRequest: Encodable {
-    var query: String
-    var variables: [String: String]?
-}
-
-private struct ShopifyOAuthResponse: Decodable {
-    var accessToken: String
-
-    enum CodingKeys: String, CodingKey {
-        case accessToken = "access_token"
-    }
-}
-
-private struct ShopifyGraphQLResponse<T: Decodable>: Decodable {
-    var data: T?
-    var errors: [ShopifyGraphQLError]?
-}
-
-private struct ShopifyGraphQLError: Decodable {
-    var message: String
-}
-
-private struct ShopifyProductPriceData: Decodable {
-    var product: Product?
-
-    struct Product: Decodable {
-        var legacyResourceId: String?
-        var variants: VariantConnection
-    }
-
-    struct VariantConnection: Decodable {
-        var nodes: [Variant]
-    }
-
-    struct Variant: Decodable {
-        var price: String?
-        var compareAtPrice: String?
-        var contextualPricing: ContextualPricing?
-    }
-
-    struct ContextualPricing: Decodable {
-        var price: Money?
-        var compareAtPrice: Money?
-    }
-
-    struct Money: Decodable {
-        var amount: String
-        var currencyCode: String
-    }
-}
-
-private struct ShopifyDiscountSnapshotData: Decodable {
-    var metaobjectByHandle: Metaobject?
-
-    struct Metaobject: Decodable {
-        var fields: [Field]
-    }
-
-    struct Field: Decodable {
-        var key: String
-        var value: String?
-    }
-}
-
-private struct ShopifyComponentPriceData: Decodable {
-    var products: ProductConnection
-
-    struct ProductConnection: Decodable {
-        var nodes: [Product]
-    }
-
-    struct Product: Decodable {
-        var title: String
-        var variants: VariantConnection
-    }
-
-    struct VariantConnection: Decodable {
-        var nodes: [Variant]
-    }
-
-    struct Variant: Decodable {
-        var title: String
-        var price: String?
-        var contextualPricing: ContextualPricing?
-    }
-
-    struct ContextualPricing: Decodable {
-        var price: Money?
-    }
-
-    struct Money: Decodable {
-        var amount: String
-        var currencyCode: String
-    }
-}
-
-private struct ShopifyShippingInfoData: Decodable {
-    var metaobjectByHandle: Metaobject?
-
-    struct Metaobject: Decodable {
-        var fields: [Field]
-    }
-
-    struct Field: Decodable {
-        var key: String
-        var value: String?
-    }
-}
-
-private final class ShopifyAdminPricingService {
-    private let credentials: ShopifyCredentials
-    private var cachedAccessToken: String?
-
-    init(credentials: ShopifyCredentials) {
-        self.credentials = credentials
-    }
-
-    func fetchPrices(for market: AdLocalizationLanguage, products: [ShopifyProductDefinition]) async throws -> SoundbrennerPriceResponse {
-        let discountSnapshot = try? await fetchDiscountSnapshot()
-        var rows: [String: SoundbrennerPriceResponse.ProductPrice] = [:]
-
-        for product in products {
-            let adminPrice = try await fetchProductPrice(product: product, countryCode: market.countryCode)
-            let discounted = applyDiscountSnapshot(to: adminPrice, snapshot: discountSnapshot)
-            rows[product.productID] = SoundbrennerPriceResponse.ProductPrice(
-                productId: product.productID,
-                currency: discounted.currency,
-                amount: roundAmount(discounted.amount, currency: discounted.currency),
-                display: formatAmount(discounted.amount, currency: discounted.currency, localeIdentifier: localeIdentifier(for: market)),
-                compareAtAmount: discounted.compareAtAmount.map { roundAmount($0, currency: discounted.currency) },
-                compareAtDisplay: discounted.compareAtAmount.map {
-                    formatAmount($0, currency: discounted.currency, localeIdentifier: localeIdentifier(for: market))
-                },
-                discountPercentage: discountPercentage(current: discounted.amount, compareAt: discounted.compareAtAmount),
-                marketingAmountOffDisplay: marketingAmountOffDisplay(
-                    current: discounted.amount,
-                    compareAt: discounted.compareAtAmount,
-                    currency: discounted.currency,
-                    localeIdentifier: localeIdentifier(for: market)
-                ),
-                source: "shopify-admin",
-                exact: true,
-                stale: false,
-                fetchedAt: ISO8601DateFormatter().string(from: .now)
-            )
-        }
-
-        return SoundbrennerPriceResponse(
-            country: market.countryCode,
-            market: market.marketCode,
-            currency: market.currencyCode,
-            generatedAt: ISO8601DateFormatter().string(from: .now),
-            ratesFetchedAt: nil,
-            pricesByProductId: rows
-        )
-    }
-
-    func fetchShippingInfo(for market: AdLocalizationLanguage) async throws -> AdLocalizationShippingInfo {
-        let countryHandle = market.countryCode.lowercased()
-        let data = try await graphql(
-            """
-            query ShippingInfo {
-              metaobjectByHandle(handle: { type: "database_localized_shipping_info", handle: "\(countryHandle)" }) {
-                fields {
-                  key
-                  value
-                }
-              }
-            }
-            """,
-            as: ShopifyShippingInfoData.self
-        )
-
-        guard let fields = data.metaobjectByHandle?.fields else {
-            throw AppError.invalidResponse
-        }
-
-        let fieldMap = Dictionary(uniqueKeysWithValues: fields.map { ($0.key, $0.value ?? "") })
-        return AdLocalizationShippingInfo(
-            countryCode: market.countryCode,
-            shipsToCountry: booleanValue(fieldMap["ship_to_it"], defaultValue: true),
-            hasFreeShipping: booleanValue(fieldMap["free_shipping_available"], defaultValue: false),
-            threshold: fieldMap["free_shipping_threshold_in_local_currency"].flatMap(Double.init),
-            currency: market.currencyCode,
-            advertisedMinTime: fieldMap["advertised_min_time"],
-            advertisedMaxTime: fieldMap["advertised_max_time"]
-        )
-    }
-
-    func fetchDiscountInfo(products: [ShopifyProductDefinition]) async throws -> AdLocalizationDiscountInfo {
-        let snapshot = try await fetchDiscountSnapshot()
-        let sitewidePercentage = normalizedPercentage(snapshot.sitewidePercentage)
-        var maxPercentage = sitewidePercentage
-        var maxProductName: String?
-
-        for product in products {
-            let productPercentage = normalizedPercentage(snapshot.productPercentagesById[product.shopifyProductID] ?? 0)
-            let combinedPercentage = (1 - ((1 - sitewidePercentage / 100) * (1 - productPercentage / 100))) * 100
-            if combinedPercentage > maxPercentage {
-                maxPercentage = combinedPercentage
-                maxProductName = product.name
-            }
-        }
-
-        return AdLocalizationDiscountInfo(
-            sitewidePercentage: sitewidePercentage,
-            maxAdvertisedPercentage: maxPercentage,
-            maxAdvertisedProductName: maxProductName,
-            generatedAt: snapshot.generatedAt,
-            syncedAt: snapshot.syncedAt
-        )
-    }
-
-    func fetchComponentPriceMatches(for market: AdLocalizationLanguage) async throws -> [AdLocalizationComponentPriceMatch] {
-        let data = try await graphql(
-            """
-            query ComponentPriceMatches($country: CountryCode!) {
-              products(first: 100, query: "status:active") {
-                nodes {
-                  title
-                  variants(first: 10) {
-                    nodes {
-                      title
-                      price
-                      contextualPricing(context: { country: $country }) {
-                        price {
-                          amount
-                          currencyCode
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-            """,
-            variables: ["country": market.countryCode],
-            as: ShopifyComponentPriceData.self
-        )
-
-        struct Candidate {
-            var targetAmount: Double
-            var currency: String
-            var title: String
-        }
-
-        var candidatesByUSDPrice: [Int: [Candidate]] = [:]
-        for product in data.products.nodes {
-            for variant in product.variants.nodes {
-                guard let rawUSDPrice = variant.price,
-                      let usdAmount = Double(rawUSDPrice),
-                      let targetPrice = variant.contextualPricing?.price,
-                      let targetAmount = Double(targetPrice.amount),
-                      usdAmount > 0 else {
-                    continue
-                }
-                let key = Int((usdAmount * 100).rounded())
-                let title = variant.title == "Default Title" ? product.title : "\(product.title) - \(variant.title)"
-                candidatesByUSDPrice[key, default: []].append(Candidate(
-                    targetAmount: targetAmount,
-                    currency: targetPrice.currencyCode,
-                    title: title
-                ))
-            }
-        }
-
-        return candidatesByUSDPrice
-            .compactMap { key, candidates -> AdLocalizationComponentPriceMatch? in
-                guard let firstCandidate = candidates.sorted(by: { $0.title.localizedStandardCompare($1.title) == .orderedAscending }).first else {
-                    return nil
-                }
-                let usdAmount = Double(key) / 100
-                return AdLocalizationComponentPriceMatch(
-                    sourceUSDDisplay: formatAmount(usdAmount, currency: "USD", localeIdentifier: "en_US"),
-                    targetDisplay: formatAmount(firstCandidate.targetAmount, currency: firstCandidate.currency, localeIdentifier: market.localeIdentifier),
-                    exampleTitles: Array(Set(candidates.map(\.title))).sorted()
-                )
-            }
-            .sorted { $0.sourceUSDDisplay.localizedStandardCompare($1.sourceUSDDisplay) == .orderedAscending }
-    }
-
-    private func fetchAccessToken() async throws -> String {
-        if let cachedAccessToken {
-            return cachedAccessToken
-        }
-
-        let url = URL(string: "https://\(credentials.normalizedStoreDomain)/admin/oauth/access_token")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.httpBody = formURLEncodedBody([
-            "grant_type": "client_credentials",
-            "client_id": credentials.clientID,
-            "client_secret": credentials.clientSecret
-        ])
-        request.timeoutInterval = 30
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200..<300).contains(httpResponse.statusCode) else {
-            throw AppError.apiError("Shopify OAuth failed.")
-        }
-
-        let payload = try JSONDecoder().decode(ShopifyOAuthResponse.self, from: data)
-        cachedAccessToken = payload.accessToken
-        return payload.accessToken
-    }
-
-    private func graphql<T: Decodable>(_ query: String, variables: [String: String]? = nil, as type: T.Type) async throws -> T {
-        let endpoint = URL(string: "https://\(credentials.normalizedStoreDomain)/admin/api/\(credentials.apiVersion)/graphql.json")!
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(try await fetchAccessToken(), forHTTPHeaderField: "X-Shopify-Access-Token")
-        request.httpBody = try JSONEncoder().encode(ShopifyGraphQLRequest(query: query, variables: variables))
-        request.timeoutInterval = 30
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200..<300).contains(httpResponse.statusCode) else {
-            throw AppError.apiError("Shopify GraphQL request failed.")
-        }
-
-        let payload = try JSONDecoder().decode(ShopifyGraphQLResponse<T>.self, from: data)
-        if let message = payload.errors?.map(\.message).joined(separator: "; "), !message.isEmpty {
-            throw AppError.apiError(message)
-        }
-        guard let data = payload.data else {
-            throw AppError.invalidResponse
-        }
-        return data
-    }
-
-    private func fetchProductPrice(product: ShopifyProductDefinition, countryCode: String) async throws -> ShopifyAdminProductPrice {
-        let data = try await graphql(
-            """
-            query ProductPrice($id: ID!, $country: CountryCode!) {
-              product(id: $id) {
-                legacyResourceId
-                variants(first: 1) {
-                  nodes {
-                    price
-                    compareAtPrice
-                    contextualPricing(context: { country: $country }) {
-                      price {
-                        amount
-                        currencyCode
-                      }
-                      compareAtPrice {
-                        amount
-                        currencyCode
-                      }
-                    }
-                  }
-                }
-              }
-            }
-            """,
-            variables: [
-                "id": "gid://shopify/Product/\(product.shopifyProductID)",
-                "country": countryCode
-            ],
-            as: ShopifyProductPriceData.self
-        )
-
-        guard let node = data.product?.variants.nodes.first else {
-            throw AppError.invalidResponse
-        }
-
-        if let contextualPrice = node.contextualPricing?.price,
-           let amount = Double(contextualPrice.amount) {
-            let compareAtAmount = node.contextualPricing?.compareAtPrice.flatMap { Double($0.amount) }
-            return ShopifyAdminProductPrice(
-                productID: product.productID,
-                name: product.name,
-                productLegacyID: data.product?.legacyResourceId,
-                amount: amount,
-                currency: contextualPrice.currencyCode,
-                compareAtAmount: compareAtAmount
-            )
-        }
-
-        guard let rawPrice = node.price,
-              let amount = Double(rawPrice) else {
-            throw AppError.invalidResponse
-        }
-
-        return ShopifyAdminProductPrice(
-            productID: product.productID,
-            name: product.name,
-            productLegacyID: data.product?.legacyResourceId,
-            amount: amount,
-            currency: "USD",
-            compareAtAmount: node.compareAtPrice.flatMap(Double.init)
-        )
-    }
-
-    private func fetchDiscountSnapshot() async throws -> ShopifyDiscountSnapshot {
-        let data = try await graphql(
-            """
-            query DiscountSnapshot {
-              metaobjectByHandle(handle: { type: "storefront_discount_snapshot", handle: "current" }) {
-                fields {
-                  key
-                  value
-                }
-              }
-            }
-            """,
-            as: ShopifyDiscountSnapshotData.self
-        )
-
-        guard let fields = data.metaobjectByHandle?.fields else {
-            throw AppError.invalidResponse
-        }
-
-        let fieldMap = Dictionary(uniqueKeysWithValues: fields.map { ($0.key, $0.value ?? "") })
-        let rawPayload = fieldMap["payload"] ?? "{}"
-        let payloadData = Data(rawPayload.utf8)
-        let payload = (try? JSONSerialization.jsonObject(with: payloadData)) as? [String: Any] ?? [:]
-        let productPercentages = (payload["productPercentagesById"] as? [String: Any] ?? [:]).reduce(into: [String: Double]()) { result, entry in
-            result[entry.key] = numericValue(entry.value)
-        }
-
-        return ShopifyDiscountSnapshot(
-            generatedAt: payload["generatedAt"] as? String,
-            syncedAt: fieldMap["synced_at"],
-            sitewidePercentage: numericValue(payload["sitewidePercentage"]),
-            productPercentagesById: productPercentages
-        )
-    }
-
-    private func applyDiscountSnapshot(to price: ShopifyAdminProductPrice, snapshot: ShopifyDiscountSnapshot?) -> ShopifyAdminProductPrice {
-        guard let snapshot,
-              let productLegacyID = price.productLegacyID else {
-            return price
-        }
-
-        let sitewideFraction = normalizedPercentage(snapshot.sitewidePercentage) / 100
-        let productFraction = normalizedPercentage(snapshot.productPercentagesById[productLegacyID] ?? 0) / 100
-        let combinedDiscountFraction = 1 - ((1 - sitewideFraction) * (1 - productFraction))
-        guard combinedDiscountFraction > 0 else {
-            return price
-        }
-
-        return ShopifyAdminProductPrice(
-            productID: price.productID,
-            name: price.name,
-            productLegacyID: price.productLegacyID,
-            amount: price.amount * (1 - combinedDiscountFraction),
-            currency: price.currency,
-            compareAtAmount: price.amount
-        )
-    }
-
-    private func formatAmount(_ amount: Double, currency: String, localeIdentifier: String) -> String {
-        let roundedAmount = roundAmount(amount, currency: currency)
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .currency
-        formatter.currencyCode = currency
-        formatter.maximumFractionDigits = 0
-        formatter.locale = Locale(identifier: localeIdentifier)
-        let display = formatter.string(from: NSNumber(value: roundedAmount)) ?? "\(currency) \(Int(roundedAmount))"
-
-        switch currency {
-        case "AUD" where display.contains("$") && !display.contains("A$") && !display.contains("AU$"):
-            return display.replacingOccurrences(of: "$", with: "AU$")
-        case "CAD" where display.contains("$") && !display.contains("CA$"):
-            return display.replacingOccurrences(of: "$", with: "CA$")
-        default:
-            return display
-        }
-    }
-
-    private func roundAmount(_ amount: Double, currency: String) -> Double {
-        switch currency {
-        case "JPY":
-            max(100, (amount / 100).rounded() * 100)
-        case "KRW":
-            max(1_000, (amount / 1_000).rounded() * 1_000)
-        default:
-            amount.rounded()
-        }
-    }
-
-    private func discountPercentage(current: Double, compareAt: Double?) -> Double? {
-        guard let compareAt, compareAt > current else {
-            return nil
-        }
-        return ((compareAt - current) / compareAt * 10000).rounded() / 100
-    }
-
-    private func marketingAmountOffDisplay(current: Double, compareAt: Double?, currency: String, localeIdentifier: String) -> String? {
-        guard let compareAt, compareAt > current else {
-            return nil
-        }
-        let amount = SoundbrennerPriceResponse.marketingAmountOff(compareAt - current, currency: currency)
-        guard amount > 0 else {
-            return nil
-        }
-        return formatAmount(amount, currency: currency, localeIdentifier: localeIdentifier)
-    }
-
-    private func localeIdentifier(for market: AdLocalizationLanguage) -> String {
-        market.localeIdentifier
-    }
-
-    private func normalizedPercentage(_ value: Double) -> Double {
-        min(max(value, 0), 100)
-    }
-}
-
-private func booleanValue(_ value: String?, defaultValue: Bool) -> Bool {
-    guard let value else {
-        return defaultValue
-    }
-    switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-    case "true", "1", "yes":
-        return true
-    case "false", "0", "no":
-        return false
-    default:
-        return defaultValue
-    }
-}
-
-private func numericValue(_ value: Any?) -> Double {
-    switch value {
-    case let number as NSNumber:
-        number.doubleValue
-    case let number as Double:
-        number
-    case let number as Int:
-        Double(number)
-    case let string as String:
-        Double(string) ?? 0
-    default:
-        0
-    }
-}
-
-private func formURLEncodedBody(_ values: [String: String]) -> Data {
-    var components = URLComponents()
-    components.queryItems = values.map { URLQueryItem(name: $0.key, value: $0.value) }
-    return Data((components.percentEncodedQuery ?? "").utf8)
-}
-
-@MainActor
-private final class AdLocalizationTruthService {
-    private let articleIndexURL = URL(string: "https://www.audiochronicle.com/data/article-localization-index.json")!
-    private let priceAPIURL = URL(string: "https://www.audiochronicle.com/api/prices")!
-    private let credentialsStore = ShopifyCredentialsStore()
-    func fetch(
-        for markets: Set<AdLocalizationLanguage>,
-        product: AdLocalizationProduct,
-        audioChronicleURL: String?
-    ) async throws -> AdLocalizationTruthPacket {
-        let articleScope = try await fetchArticleIndex().scoped(to: audioChronicleURL)
-        let shopifyPayload = try await fetchShopifyPayload(for: markets, product: product)
-        let prices = product == .none || !shopifyPayload.prices.isEmpty
-            ? shopifyPayload.prices
-            : try await fetchPricesFromAudioChronicle(for: markets, product: product)
-        return AdLocalizationTruthPacket(
-            fetchedAt: .now,
-            selectedProduct: product,
-            articleURL: normalizedOptionalString(audioChronicleURL),
-            articleURLMatched: articleScope.matched,
-            articles: articleScope.index,
-            pricesByMarket: prices,
-            discountByMarket: shopifyPayload.discounts,
-            componentPriceMatchesByMarket: shopifyPayload.componentPriceMatches,
-            shippingByMarket: shopifyPayload.shipping
-        )
-    }
-
-    private func fetchArticleIndex() async throws -> AudioChronicleArticleIndex {
-        let (data, response) = try await URLSession.shared.data(from: articleIndexURL)
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200..<300).contains(httpResponse.statusCode) else {
-            throw AppError.apiError("Audio Chronicle article index could not be fetched.")
-        }
-        return try JSONDecoder().decode(AudioChronicleArticleIndex.self, from: data)
-    }
-
-    private func fetchShopifyPayload(
-        for markets: Set<AdLocalizationLanguage>,
-        product: AdLocalizationProduct
-    ) async throws -> (
-        prices: [AdLocalizationLanguage: SoundbrennerPriceResponse],
-        discounts: [AdLocalizationLanguage: AdLocalizationDiscountInfo],
-        componentPriceMatches: [AdLocalizationLanguage: [AdLocalizationComponentPriceMatch]],
-        shipping: [AdLocalizationLanguage: AdLocalizationShippingInfo]
-    ) {
-        if let credentials = credentialsStore.read() {
-            let shopifyService = ShopifyAdminPricingService(credentials: credentials)
-            let selectedProduct = product == .none ? nil : shopifyDefinition(for: product)
-            let discountInfo = try? await shopifyService.fetchDiscountInfo(products: allShopifyDefinitions())
-            var directResults: [AdLocalizationLanguage: SoundbrennerPriceResponse] = [:]
-            var discountResults: [AdLocalizationLanguage: AdLocalizationDiscountInfo] = [:]
-            var componentPriceMatchResults: [AdLocalizationLanguage: [AdLocalizationComponentPriceMatch]] = [:]
-            var shippingResults: [AdLocalizationLanguage: AdLocalizationShippingInfo] = [:]
-            var shouldFallback = false
-
-            for market in markets {
-                do {
-                    if let selectedProduct {
-                        directResults[market] = try await shopifyService.fetchPrices(for: market, products: [selectedProduct])
-                    }
-                    if let discountInfo {
-                        discountResults[market] = discountInfo
-                    }
-                    componentPriceMatchResults[market] = try? await shopifyService.fetchComponentPriceMatches(for: market)
-                    shippingResults[market] = try? await shopifyService.fetchShippingInfo(for: market)
-                } catch {
-                    shouldFallback = true
-                    break
-                }
-            }
-
-            if !shouldFallback, selectedProduct == nil || !directResults.isEmpty {
-                return (directResults, discountResults, componentPriceMatchResults, shippingResults)
-            }
-        }
-
-        return ([:], [:], [:], [:])
-    }
-
-    private func fetchPricesFromAudioChronicle(
-        for markets: Set<AdLocalizationLanguage>,
-        product: AdLocalizationProduct
-    ) async throws -> [AdLocalizationLanguage: SoundbrennerPriceResponse] {
-        var results: [AdLocalizationLanguage: SoundbrennerPriceResponse] = [:]
-        for market in markets {
-            var components = URLComponents(url: priceAPIURL, resolvingAgainstBaseURL: false)!
-            components.queryItems = [
-                URLQueryItem(name: "products", value: product.productID),
-                URLQueryItem(name: "country", value: market.countryCode)
-            ]
-            guard let url = components.url else {
-                continue
-            }
-
-            let (data, response) = try await URLSession.shared.data(from: url)
-            guard let httpResponse = response as? HTTPURLResponse,
-                  (200..<300).contains(httpResponse.statusCode) else {
-                continue
-            }
-            results[market] = try JSONDecoder().decode(SoundbrennerPriceResponse.self, from: data)
-        }
-        return results
-    }
-
-    private func shopifyDefinition(for product: AdLocalizationProduct) -> ShopifyProductDefinition {
-        ShopifyProductDefinition(
-            productID: product.productID,
-            name: product.productName,
-            shopifyProductID: product.shopifyProductID
-        )
-    }
-
-    private func allShopifyDefinitions() -> [ShopifyProductDefinition] {
-        AdLocalizationProduct.allCases
-            .filter { $0 != .none }
-            .map(shopifyDefinition(for:))
-    }
-
-    private func normalizedOptionalString(_ value: String?) -> String? {
-        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? nil : trimmed
-    }
-}
-
 @MainActor
 final class GalleryStore: ObservableObject {
     @Published private(set) var jobs: [GenerationJob] = []
+    @Published private(set) var historyError: String?
 
+    private static let logger = Logger(subsystem: "com.soundbrenner.mediagenerator", category: "Gallery")
     private let fileManager = FileManager.default
     private let metadataURL: URL
     private let pendingMetadataURL: URL
     private let imagesDirectoryURL: URL
     private let imageCache = NSCache<NSString, NSImage>()
 
-    init() {
-        let baseURL = Self.appSupportDirectory()
+    init(baseURL: URL? = nil) {
+        let baseURL = baseURL ?? Self.appSupportDirectory()
         self.imagesDirectoryURL = baseURL.appendingPathComponent("Images", isDirectory: true)
         self.metadataURL = baseURL.appendingPathComponent("jobs.json")
         self.pendingMetadataURL = baseURL.appendingPathComponent("pending-jobs.json")
+        loadHistory()
+    }
 
+    func loadHistory() {
         do {
             try fileManager.createDirectory(at: imagesDirectoryURL, withIntermediateDirectories: true)
             jobs = try loadJobs()
-            try recoverInterruptedPendingJobs()
         } catch {
-            jobs = []
+            historyError = "Couldn’t load gallery history."
+            Self.logger.error("Couldn’t load gallery history: \(String(reflecting: error), privacy: .private)")
+            return
+        }
+
+        do {
+            try recoverInterruptedPendingJobs()
+            historyError = nil
+        } catch {
+            historyError = "Couldn’t recover interrupted generations."
+            Self.logger.error("Couldn’t recover interrupted generations: \(String(reflecting: error), privacy: .private)")
+        }
+    }
+
+    func requireLoadedHistory() throws {
+        if let historyError {
+            throw AppError.apiError(historyError)
         }
     }
 
@@ -2596,6 +1027,7 @@ final class GalleryStore: ObservableObject {
         referenceImages: [GenerationReferenceImageSnapshot],
         userReferenceImages: [GenerationReferenceImageSnapshot]
     ) throws -> GenerationJob {
+        try requireLoadedHistory()
         let savedImages = try payloads.enumerated().map { index, payload in
             let fileName = "\(UUID().uuidString)-\(index + 1).\(payload.format.rawValue)"
             let destination = imagesDirectoryURL.appendingPathComponent(fileName)
@@ -2635,7 +1067,7 @@ final class GalleryStore: ObservableObject {
         )
 
         jobs.insert(job, at: 0)
-        try persist()
+        try persist(jobs)
         return job
     }
 
@@ -2659,6 +1091,7 @@ final class GalleryStore: ObservableObject {
         referenceImages: [GenerationReferenceImageSnapshot],
         userReferenceImages: [GenerationReferenceImageSnapshot]
     ) throws -> GenerationJob {
+        try requireLoadedHistory()
         let job = GenerationJob(
             inputPrompt: inputPrompt.trimmingCharacters(in: .whitespacesAndNewlines),
             prompt: form.prompt.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -2692,7 +1125,7 @@ final class GalleryStore: ObservableObject {
         )
 
         jobs.insert(job, at: 0)
-        try persist()
+        try persist(jobs)
         return job
     }
 
@@ -2732,6 +1165,7 @@ final class GalleryStore: ObservableObject {
     }
 
     func delete(image: GalleryImage, from job: GenerationJob) throws {
+        try requireLoadedHistory()
         let imageURL = imageURL(for: image)
         if fileManager.fileExists(atPath: imageURL.path) {
             try fileManager.removeItem(at: imageURL)
@@ -2784,10 +1218,11 @@ final class GalleryStore: ObservableObject {
             )
         }
 
-        try persist()
+        try persist(jobs)
     }
 
     func delete(job: GenerationJob) throws {
+        try requireLoadedHistory()
         for image in job.images {
             let imageURL = imageURL(for: image)
             if fileManager.fileExists(atPath: imageURL.path) {
@@ -2797,7 +1232,7 @@ final class GalleryStore: ObservableObject {
         }
 
         jobs.removeAll { $0.id == job.id }
-        try persist()
+        try persist(jobs)
     }
 
     func addPendingRecord(
@@ -2853,7 +1288,7 @@ final class GalleryStore: ObservableObject {
         try persistPendingRecords(records)
     }
 
-    private func persist() throws {
+    private func persist(_ jobs: [GenerationJob]) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -2870,25 +1305,24 @@ final class GalleryStore: ObservableObject {
     }
 
     private func loadJobs() throws -> [GenerationJob] {
-        guard fileManager.fileExists(atPath: metadataURL.path) else {
-            return []
-        }
-
-        let data = try Data(contentsOf: metadataURL)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode([GenerationJob].self, from: data)
+        try loadRecords(from: metadataURL)
     }
 
     private func loadPendingRecords() throws -> [PendingGenerationRecord] {
-        guard fileManager.fileExists(atPath: pendingMetadataURL.path) else {
+        try loadRecords(from: pendingMetadataURL)
+    }
+
+    private func loadRecords<Record: Decodable>(from url: URL) throws -> [Record] {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             return []
         }
 
-        let data = try Data(contentsOf: pendingMetadataURL)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode([PendingGenerationRecord].self, from: data)
+        return try decoder.decode([Record].self, from: data)
     }
 
     private func recoverInterruptedPendingJobs() throws {
@@ -2897,7 +1331,8 @@ final class GalleryStore: ObservableObject {
             return
         }
 
-        let recoveredJobs = records.map { record in
+        let existingIDs = Set(jobs.map(\.id))
+        let recoveredJobs = records.filter { !existingIDs.contains($0.id) }.map { record in
             GenerationJob(
                 id: record.id,
                 inputPrompt: record.inputPrompt,
@@ -2932,8 +1367,11 @@ final class GalleryStore: ObservableObject {
             )
         }
 
-        jobs.insert(contentsOf: recoveredJobs, at: 0)
-        try persist()
+        if !recoveredJobs.isEmpty {
+            let updatedJobs = recoveredJobs + jobs
+            try persist(updatedJobs)
+            jobs = updatedJobs
+        }
         try persistPendingRecords([])
     }
 
@@ -3044,7 +1482,7 @@ enum SharedProfileStorage {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.message = "Choose the Dropbox image generation folder, or the LLM context folder that contains marketing/image generation."
-        panel.prompt = "Use Folder"
+        panel.prompt = "Use folder"
 
         if let defaultURL = defaultSharedImageGenerationDirectory(fileManager: fileManager) {
             panel.directoryURL = defaultURL.deletingLastPathComponent()
@@ -5498,46 +3936,22 @@ final class PromotionalContextStore: ObservableObject {
 @MainActor
 final class AppModel: ObservableObject {
     private static let maxGenerationAttempts = 3
-    private static let adLocalizationConcurrencyLimit = 3
     private static let formPersistenceDebounceNanoseconds: UInt64 = 350_000_000
     static let referenceLikenessSafetyRule = """
     Reference likeness rule:
     Use attached model and reference photos only for broad creative direction such as pose, framing, lighting, styling, wardrobe, mood, and composition. Do not recreate, clone, or closely resemble any real person shown in a reference photo. If a person is needed, generate a new fictional person with different facial features, face shape, skin details, hairline, distinctive marks, and overall identity. Product references may still be matched accurately for product shape, materials, branding, and proportions.
     """
-    private static let adLocalizationFolderBookmarkKey = "ad_localization_folder_bookmark"
-    private static let selectedAdLocalizationLanguagesKey = "selected_ad_localization_languages"
-    private static let selectedAdLocalizationProductKey = "selected_ad_localization_product"
-    private static let adLocalizationAudioChronicleURLKey = "ad_localization_audio_chronicle_url"
     @Published var form = GenerationForm() {
         didSet {
             scheduleFormPersistence()
         }
     }
-    @Published var generatorMode: GeneratorMode = .regular
     @Published var apiKey = ""
     @Published var geminiAPIKey = ""
     @Published var isGenerating = false
     @Published var pendingGenerations: [PendingGenerationBatch] = []
-    @Published var adLocalizationFolderURL: URL?
-    @Published var selectedAdLocalizationLanguages: Set<AdLocalizationLanguage> = [.germanEUR] {
-        didSet {
-            persistAdLocalizationLanguages()
-        }
-    }
-    @Published var selectedAdLocalizationProduct: AdLocalizationProduct = .none {
-        didSet {
-            persistAdLocalizationProduct()
-        }
-    }
-    @Published var adLocalizationAudioChronicleURL = "" {
-        didSet {
-            persistAdLocalizationAudioChronicleURL()
-        }
-    }
-    @Published var adLocalizationJobs: [AdLocalizationJob] = []
-    @Published var isAdLocalizationRunning = false
     @Published var lastError: String?
-    @Published var statusMessage = "Ready"
+    @Published var statusMessage = ""
     @Published var selectedJobID: UUID?
     @Published var referenceImageURLs: [URL] = []
     @Published var selectedModelIDs: [UUID] = [] {
@@ -5618,8 +4032,13 @@ final class AppModel: ObservableObject {
     @Published var isCameraManagerPresented = false
     @Published var availableImageModels: [ImageModelOption] = OpenAIImageService.defaultImageModels
     @Published var imageModelRefreshStatus = "Using default image model list."
+    @Published private(set) var teamSession: TeamSession?
+    @Published private(set) var teamSessionNeedsSignIn = false
+    @Published private(set) var isChangingTeamSession = false
+    @Published private(set) var teamAccessMessage: String?
 
     private let apiKeyStore = APIKeyStore()
+    private let teamSessionStore = SecureAPIKeyStore(service: "com.soundbrenner.mediaforge.team", account: "session")
     private let geminiAPIKeyStore = SecureAPIKeyStore(
         service: "com.soundbrenner.mediagenerator",
         account: "gemini-api-key"
@@ -5627,16 +4046,13 @@ final class AppModel: ObservableObject {
     private let preferences = AppPreferencesStore()
     private let service = OpenAIImageService()
     private let geminiService = GeminiImageService()
-    private let adLocalizationTruthService = AdLocalizationTruthService()
     private let fileManager = FileManager.default
     private let referenceImagesDirectoryURL: URL
-    private let adLocalizationJobsURL: URL
     private var isRestoringPreferences = false
     private var pendingFormPersistenceTask: Task<Void, Never>?
 
     init() {
         referenceImagesDirectoryURL = Self.referenceImagesDirectory()
-        adLocalizationJobsURL = Self.appSupportFile(named: "ad-localization-jobs.json")
         isRestoringPreferences = true
         if let savedForm = preferences.loadForm() {
             form = savedForm
@@ -5652,14 +4068,66 @@ final class AppModel: ObservableObject {
         selectedPromotionalContextIDs = Array(selectedPromotionalContextIDs.prefix(1))
         selectedPresetIDs = preferences.loadSelectedPresetIDLists()
         randomPresetCategories = preferences.loadRandomPresetCategories()
-        selectedAdLocalizationLanguages = Self.loadAdLocalizationLanguages()
-        selectedAdLocalizationProduct = Self.loadAdLocalizationProduct()
-        adLocalizationAudioChronicleURL = Self.loadAdLocalizationAudioChronicleURL()
-        adLocalizationFolderURL = Self.loadAdLocalizationFolderURL()
-        adLocalizationJobs = Self.loadAdLocalizationJobs(from: adLocalizationJobsURL)
         apiKey = apiKeyStore.read()
         geminiAPIKey = geminiAPIKeyStore.read()
+        if let data = teamSessionStore.read().data(using: .utf8) {
+            teamSession = try? JSONDecoder().decode(TeamSession.self, from: data)
+        }
+        teamSessionNeedsSignIn = teamSession?.isExpired ?? false
         isRestoringPreferences = false
+    }
+
+    func signInToTeam(email: String, password: String) async {
+        guard !isChangingTeamSession else { return }
+        isChangingTeamSession = true
+        teamAccessMessage = nil
+        defer { isChangingTeamSession = false }
+        do {
+            let session = try await TeamAccessService.signIn(email: email, password: password)
+            let data = try JSONEncoder().encode(session)
+            try teamSessionStore.write(String(decoding: data, as: UTF8.self))
+            teamSession = session
+            teamSessionNeedsSignIn = false
+            await refreshAvailableImageModels()
+        } catch {
+            teamAccessMessage = error.localizedDescription
+        }
+    }
+
+    func verifyTeamSession() async {
+        guard let session = teamSession, !teamSessionNeedsSignIn, !isChangingTeamSession else { return }
+        do {
+            let verified = try await TeamAccessService.verify(session)
+            guard teamSession?.token == session.token else { return }
+            teamSession = verified
+        } catch let error as TeamAccessError where error.status == 401 {
+            guard teamSession?.token == session.token else { return }
+            teamSessionNeedsSignIn = true
+            teamAccessMessage = error.localizedDescription
+        } catch {
+            // A temporary outage does not change the selected billing account.
+        }
+    }
+
+    func signOutOfTeam() async {
+        guard let session = teamSession, !isChangingTeamSession else { return }
+        isChangingTeamSession = true
+        teamAccessMessage = nil
+        defer { isChangingTeamSession = false }
+        do {
+            try teamSessionStore.write("")
+        } catch {
+            teamAccessMessage = error.localizedDescription
+            return
+        }
+        teamSession = nil
+        teamSessionNeedsSignIn = false
+        do {
+            try await TeamAccessService.signOut(session.token)
+        } catch {
+            teamAccessMessage = "Logged out on this Mac. The server could not revoke the session."
+        }
+        await refreshAvailableImageModels()
     }
 
     func saveAPIKey() {
@@ -5700,10 +4168,9 @@ final class AppModel: ObservableObject {
     }
 
     func refreshAvailableImageModels() async {
-        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedKey.isEmpty else {
+        guard let credential = try? openAICredential() else {
             availableImageModels = OpenAIImageService.defaultImageModels
-            imageModelRefreshStatus = "Add an API key to refresh the live model list."
+            imageModelRefreshStatus = "Sign in or add an API key to refresh the live model list."
             if !availableImageModels.contains(where: { $0.id == form.imageModel }) {
                 form.imageModel = availableImageModels.first?.id ?? ImageModelOption.preferredModel
             }
@@ -5711,7 +4178,7 @@ final class AppModel: ObservableObject {
         }
 
         do {
-            let models = try await service.fetchAvailableImageModels(apiKey: trimmedKey)
+            let models = try await service.fetchAvailableImageModels(credential: credential)
             availableImageModels = models
             if !models.contains(where: { $0.id == form.imageModel }) {
                 form.imageModel = models.first?.id ?? ImageModelOption.preferredModel
@@ -5748,121 +4215,6 @@ final class AppModel: ObservableObject {
 
     func removeReferenceImage(_ url: URL) {
         referenceImageURLs.removeAll { $0 == url }
-    }
-
-    func chooseAdLocalizationFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.message = "Choose the folder that contains the static ads to localize."
-        panel.prompt = "Use Folder"
-
-        if let desktopURL = try? fileManager.url(
-            for: .desktopDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: false
-        ) {
-            panel.directoryURL = desktopURL
-        }
-
-        guard panel.runModal() == .OK, let selectedURL = panel.url else {
-            return
-        }
-
-        do {
-            let bookmarkData = try selectedURL.bookmarkData(
-                options: .withSecurityScope,
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            )
-            UserDefaults.standard.set(bookmarkData, forKey: Self.adLocalizationFolderBookmarkKey)
-            adLocalizationFolderURL = selectedURL
-            statusMessage = "Ad folder selected: \(selectedURL.lastPathComponent)."
-            lastError = nil
-        } catch {
-            lastError = error.localizedDescription
-        }
-    }
-
-    func toggleAdLocalizationLanguage(_ language: AdLocalizationLanguage) {
-        if selectedAdLocalizationLanguages.contains(language) {
-            selectedAdLocalizationLanguages.remove(language)
-        } else {
-            selectedAdLocalizationLanguages.insert(language)
-        }
-    }
-
-    var adLocalizationFailures: [AdLocalizationFailure] {
-        adLocalizationJobs.compactMap { job in
-            guard job.status == .failed, let message = job.errorMessage else {
-                return nil
-            }
-            return AdLocalizationFailure(
-                id: "\(job.sourcePath)-\(job.language.rawValue)",
-                sourceFileName: job.sourceFileName,
-                languageTitle: job.language.title,
-                message: message
-            )
-        }
-    }
-
-    var adLocalizationProgressText: String {
-        guard !adLocalizationJobs.isEmpty else {
-            return "No localization batch has run yet."
-        }
-
-        let succeeded = adLocalizationJobs.filter { $0.status == .succeeded }.count
-        let skipped = adLocalizationJobs.filter { $0.status == .skipped }.count
-        let failed = adLocalizationJobs.filter { $0.status == .failed }.count
-        let running = adLocalizationJobs.filter { $0.status == .running }.count
-        return "\(succeeded)/\(adLocalizationJobs.count) done\(skipped > 0 ? ", \(skipped) skipped" : "")\(running > 0 ? ", \(running) running" : "")\(failed > 0 ? ", \(failed) failed" : "")"
-    }
-
-    func startAdLocalization() {
-        do {
-            let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedAPIKey.isEmpty else {
-                throw AppError.missingAPIKey
-            }
-            guard let folderURL = adLocalizationFolderURL else {
-                throw AppError.missingAdLocalizationFolder
-            }
-            guard !selectedAdLocalizationLanguages.isEmpty else {
-                throw AppError.missingAdLocalizationLanguages
-            }
-
-            _ = folderURL.startAccessingSecurityScopedResource()
-            let sourceURLs = try Self.imageFiles(in: folderURL, fileManager: fileManager)
-            guard !sourceURLs.isEmpty else {
-                throw AppError.emptyAdLocalizationFolder
-            }
-
-            let outputDirectory = folderURL.appendingPathComponent("Localized ads", isDirectory: true)
-            try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-            let languages = selectedAdLocalizationLanguages.sorted { $0.title < $1.title }
-            let jobs = sourceURLs.flatMap { sourceURL in
-                languages.map { language in
-                    makeAdLocalizationJob(sourceURL: sourceURL, language: language, outputDirectory: outputDirectory)
-                }
-            }
-
-            adLocalizationJobs = jobs
-            persistAdLocalizationJobs()
-            isAdLocalizationRunning = true
-            statusMessage = selectedAdLocalizationProduct == .none
-                ? "Fetching scoped article truth..."
-                : "Fetching current \(selectedAdLocalizationProduct.title) prices and scoped article truth..."
-            lastError = nil
-
-            Task {
-                await runAdLocalizationJobs(apiKey: trimmedAPIKey, outputDirectory: outputDirectory)
-            }
-        } catch {
-            lastError = error.localizedDescription
-            statusMessage = "Ad localization failed to start."
-        }
     }
 
     func toggleModelSelection(_ id: UUID) {
@@ -6029,8 +4381,9 @@ final class AppModel: ObservableObject {
         presetStore: PromptPresetStore
     ) {
         do {
+            try galleryStore.requireLoadedHistory()
             form = draftForm
-            let trimmedAPIKey = try generationAPIKey(for: draftForm)
+            let credential = try generationCredential(for: draftForm)
             let isPlainMode = draftForm.shotMode == .plain
             let selectedProduct = isPlainMode ? nil : try resolvedSelectedProduct(from: productStore, form: draftForm)
             let selectedAdAngles = isPlainMode ? [] : try resolvedSelectedAdAngles(from: adAngleStore)
@@ -6122,7 +4475,7 @@ final class AppModel: ObservableObject {
                 let referenceSnapshots = makeReferenceSnapshots(from: referenceURLs)
 
                 queueGroupedGeneration(
-                    apiKey: trimmedAPIKey,
+                    credential: credential,
                     requestForms: requestForms,
                     referenceURLsByRequest: referenceURLsByRequest,
                     inputPrompt: inputPrompt,
@@ -6177,7 +4530,7 @@ final class AppModel: ObservableObject {
                 requestForm.imageCount = draftForm.sanitizedImageCount
 
                 queueGeneration(
-                    apiKey: trimmedAPIKey,
+                    credential: credential,
                     requestForm: requestForm,
                     inputPrompt: inputPrompt,
                     referenceURLs: referenceURLs,
@@ -6214,7 +4567,7 @@ final class AppModel: ObservableObject {
     }
 
     private func queueGroupedGeneration(
-        apiKey: String,
+        credential: GenerationCredential,
         requestForms: [GenerationForm],
         referenceURLsByRequest: [[URL]],
         inputPrompt: String,
@@ -6310,7 +4663,7 @@ final class AppModel: ObservableObject {
                         detail: "Sending randomized prompt \(requestIndex) of \(requestForms.count) to \(requestForm.imageModel.isGeminiImageModel ? "Nano Banana Pro" : "OpenAI")."
                     )
                     let result = try await generateWithRetry(
-                        apiKey: apiKey,
+                        credential: credential,
                         form: requestForm,
                         referenceImageURLs: referenceURLsByRequest.indices.contains(requestOffset)
                             ? referenceURLsByRequest[requestOffset]
@@ -6396,7 +4749,7 @@ final class AppModel: ObservableObject {
     }
 
     private func queueGeneration(
-        apiKey: String,
+        credential: GenerationCredential,
         requestForm: GenerationForm,
         inputPrompt: String,
         referenceURLs: [URL],
@@ -6468,7 +4821,7 @@ final class AppModel: ObservableObject {
         Task {
             do {
                 let result = try await generateWithRetry(
-                    apiKey: apiKey,
+                    credential: credential,
                     form: requestForm,
                     referenceImageURLs: referenceURLs,
                     pendingID: pendingBatch.id,
@@ -6548,6 +4901,7 @@ final class AppModel: ObservableObject {
 
     func retry(job: GenerationJob, using galleryStore: GalleryStore) {
         do {
+            try galleryStore.requireLoadedHistory()
             var requestForm = GenerationForm()
             requestForm.prompt = job.prompt
             requestForm.shotMode = job.shotMode
@@ -6560,7 +4914,7 @@ final class AppModel: ObservableObject {
             requestForm.imageCount = job.imageCount
             requestForm.outputFormat = job.outputFormat
             requestForm.moderation = job.moderation
-            let trimmedAPIKey = try generationAPIKey(for: requestForm)
+            let credential = try generationCredential(for: requestForm)
 
             let referenceURLs = job.referenceImages.map(referenceImageURL(for:))
             let pendingBatch = PendingGenerationBatch(
@@ -6622,7 +4976,7 @@ final class AppModel: ObservableObject {
             Task {
                 do {
                     let result = try await generateWithRetry(
-                        apiKey: trimmedAPIKey,
+                        credential: credential,
                         form: requestForm,
                         referenceImageURLs: referenceURLs,
                         pendingID: pendingBatch.id,
@@ -6713,390 +5067,6 @@ final class AppModel: ObservableObject {
             lastError = nil
         } catch {
             lastError = error.localizedDescription
-        }
-    }
-
-    private func runAdLocalizationJobs(apiKey: String, outputDirectory: URL) async {
-        let selectedMarkets = Set(adLocalizationJobs.map(\.language))
-        let truthPacket: AdLocalizationTruthPacket?
-        do {
-            truthPacket = try await adLocalizationTruthService.fetch(
-                for: selectedMarkets,
-                product: selectedAdLocalizationProduct,
-                audioChronicleURL: adLocalizationAudioChronicleURL
-            )
-            statusMessage = "Queued \(adLocalizationJobs.count) localized ad image\(adLocalizationJobs.count == 1 ? "" : "s") with live price, article truth, and QC."
-        } catch {
-            truthPacket = nil
-            statusMessage = "Live truth fetch failed; preserving existing prices and titles."
-        }
-
-        let runnableJobs = adLocalizationJobs.filter { $0.status != .succeeded && $0.status != .skipped }
-        await withTaskGroup(of: Void.self) { group in
-            var iterator = runnableJobs.makeIterator()
-
-            for _ in 0..<Self.adLocalizationConcurrencyLimit {
-                guard let job = iterator.next() else {
-                    break
-                }
-                group.addTask { [weak self] in
-                    await self?.runSingleAdLocalizationJob(
-                        jobID: job.id,
-                        apiKey: apiKey,
-                        outputDirectory: outputDirectory,
-                        truthPacket: truthPacket
-                    )
-                }
-            }
-
-            while await group.next() != nil {
-                guard let job = iterator.next() else {
-                    continue
-                }
-                group.addTask { [weak self] in
-                    await self?.runSingleAdLocalizationJob(
-                        jobID: job.id,
-                        apiKey: apiKey,
-                        outputDirectory: outputDirectory,
-                        truthPacket: truthPacket
-                    )
-                }
-            }
-        }
-
-        isAdLocalizationRunning = false
-        let failedCount = adLocalizationJobs.filter { $0.status == .failed }.count
-        let succeededCount = adLocalizationJobs.filter { $0.status == .succeeded }.count
-        let skippedCount = adLocalizationJobs.filter { $0.status == .skipped }.count
-        statusMessage = failedCount == 0
-            ? "Ad localization complete: \(succeededCount) image\(succeededCount == 1 ? "" : "s")\(skippedCount > 0 ? ", \(skippedCount) skipped" : "")."
-            : "Ad localization complete with \(failedCount) failure\(failedCount == 1 ? "" : "s")."
-        lastError = failedCount == 0 ? nil : "Some localized ads failed. Check the language list for details."
-        sendAdLocalizationNotification(succeededCount: succeededCount, skippedCount: skippedCount, failedCount: failedCount)
-    }
-
-    private func runSingleAdLocalizationJob(
-        jobID: UUID,
-        apiKey: String,
-        outputDirectory: URL,
-        truthPacket: AdLocalizationTruthPacket?
-    ) async {
-        guard let index = adLocalizationJobs.firstIndex(where: { $0.id == jobID }) else {
-            return
-        }
-
-        var job = adLocalizationJobs[index]
-        adLocalizationJobs[index].status = .running
-        adLocalizationJobs[index].updatedAt = .now
-        persistAdLocalizationJobs()
-        statusMessage = "Localizing \(job.sourceFileName) to \(job.language.title)..."
-
-        do {
-            let sourceURL = URL(fileURLWithPath: job.sourcePath)
-            let outputURL = outputDirectory.appendingPathComponent(Self.outputFileName(for: sourceURL, language: job.language, outputFormat: form.outputFormat))
-            if fileManager.fileExists(atPath: outputURL.path) {
-                adLocalizationJobs[index].status = .succeeded
-                adLocalizationJobs[index].outputPath = outputURL.path
-                adLocalizationJobs[index].errorMessage = nil
-                adLocalizationJobs[index].updatedAt = .now
-                persistAdLocalizationJobs()
-                return
-            }
-
-            let result = try await localizeAdWithRetry(
-                apiKey: apiKey,
-                sourceURL: sourceURL,
-                language: job.language,
-                outputFormat: form.outputFormat,
-                truthPacket: truthPacket,
-                attemptHandler: { [weak self] attempt in
-                    Task { @MainActor in
-                        guard let self,
-                              let liveIndex = self.adLocalizationJobs.firstIndex(where: { $0.id == jobID }) else {
-                            return
-                        }
-                        self.adLocalizationJobs[liveIndex].attemptCount = attempt
-                        self.adLocalizationJobs[liveIndex].updatedAt = .now
-                        self.persistAdLocalizationJobs()
-                    }
-                }
-            )
-
-            guard let liveIndex = adLocalizationJobs.firstIndex(where: { $0.id == jobID }) else {
-                return
-            }
-            job = adLocalizationJobs[liveIndex]
-            switch result {
-            case .generated(let payload):
-                try payload.data.write(to: outputURL, options: .atomic)
-                adLocalizationJobs[liveIndex].status = .succeeded
-                adLocalizationJobs[liveIndex].outputPath = outputURL.path
-                adLocalizationJobs[liveIndex].errorMessage = nil
-            case .skipped(let reason):
-                adLocalizationJobs[liveIndex].status = .skipped
-                adLocalizationJobs[liveIndex].outputPath = nil
-                adLocalizationJobs[liveIndex].errorMessage = reason
-            }
-            adLocalizationJobs[liveIndex].updatedAt = .now
-            persistAdLocalizationJobs()
-        } catch {
-            guard let liveIndex = adLocalizationJobs.firstIndex(where: { $0.id == jobID }) else {
-                return
-            }
-            adLocalizationJobs[liveIndex].status = .failed
-            adLocalizationJobs[liveIndex].errorMessage = error.localizedDescription
-            adLocalizationJobs[liveIndex].updatedAt = .now
-            persistAdLocalizationJobs()
-        }
-    }
-
-    private func localizeAdWithRetry(
-        apiKey: String,
-        sourceURL: URL,
-        language: AdLocalizationLanguage,
-        outputFormat: OutputFormat,
-        truthPacket: AdLocalizationTruthPacket?,
-        attemptHandler: @escaping (Int) -> Void
-    ) async throws -> AdLocalizationRunResult {
-        var lastError: Error?
-        let outputSize = Self.outputSize(for: sourceURL)
-        let analysisTruthContext = truthPacket?.promptContext(
-            for: language,
-            includeComponentPriceMatches: false
-        )
-        let sourceIntent = try? await service.analyzeAdLocalizationSource(
-            apiKey: apiKey,
-            imageURL: sourceURL,
-            language: language,
-            truthContext: analysisTruthContext
-        )
-        if let sourceIntent,
-           Self.shouldSkipEnglishCurrencyLocalization(language: language, sourceIntent: sourceIntent) {
-            return .skipped("Skipped: no visible price, savings, percent-off, or currency-specific claim for \(language.title).")
-        }
-        let generationTruthContext = truthPacket?.promptContext(
-            for: language,
-            componentPriceFields: sourceIntent?.visibleComponentPriceFields ?? [],
-            includeComponentPriceMatches: true
-        )
-        var qcFeedback: [String] = []
-
-        for attempt in 1...Self.maxGenerationAttempts {
-            attemptHandler(attempt)
-            do {
-                let attemptPrompt = Self.adLocalizationPrompt(
-                    for: language,
-                    truthContext: generationTruthContext,
-                    sourceIntent: sourceIntent,
-                    qcFeedback: qcFeedback
-                )
-                let payload = try await service.editImage(
-                    apiKey: apiKey,
-                    imageURL: sourceURL,
-                    prompt: attemptPrompt,
-                    model: ImageModelOption.preferredModel,
-                    quality: .max,
-                    size: outputSize,
-                    outputFormat: outputFormat,
-                    moderation: .low
-                )
-
-                let qcResult = try await service.validateAdLocalizationOutput(
-                    apiKey: apiKey,
-                    sourceURL: sourceURL,
-                    outputData: payload.data,
-                    language: language,
-                    truthContext: generationTruthContext,
-                    sourceIntent: sourceIntent ?? AdLocalizationSourceIntent.fallback
-                )
-                guard qcResult.pass else {
-                    qcFeedback = qcResult.errors
-                    throw AdLocalizationQCFailure(errors: qcResult.errors)
-                }
-                return .generated(payload)
-            } catch {
-                lastError = error
-                guard attempt < Self.maxGenerationAttempts else {
-                    break
-                }
-                try? await Task.sleep(nanoseconds: UInt64(3 * attempt) * 1_000_000_000)
-            }
-        }
-
-        throw lastError ?? AppError.invalidResponse
-    }
-
-    private static func shouldSkipEnglishCurrencyLocalization(
-        language: AdLocalizationLanguage,
-        sourceIntent: AdLocalizationSourceIntent
-    ) -> Bool {
-        switch language {
-        case .englishGBP, .englishAUD, .englishCAD:
-            return !sourceIntent.hasCurrencySpecificLocalizationNeed
-        case .englishUSD, .germanEUR, .frenchEUR, .spanishEUR, .italianEUR, .japaneseJPY, .koreanKRW:
-            return false
-        }
-    }
-
-    private func makeAdLocalizationJob(
-        sourceURL: URL,
-        language: AdLocalizationLanguage,
-        outputDirectory: URL
-    ) -> AdLocalizationJob {
-        let outputURL = outputDirectory.appendingPathComponent(Self.outputFileName(for: sourceURL, language: language, outputFormat: form.outputFormat))
-        if fileManager.fileExists(atPath: outputURL.path) {
-            return AdLocalizationJob(
-                sourceURL: sourceURL,
-                language: language,
-                status: .succeeded,
-                outputPath: outputURL.path,
-                updatedAt: .now
-            )
-        }
-
-        return AdLocalizationJob(sourceURL: sourceURL, language: language)
-    }
-
-    private static func adLocalizationPrompt(
-        for language: AdLocalizationLanguage,
-        truthContext: String?,
-        sourceIntent: AdLocalizationSourceIntent?,
-        qcFeedback: [String]
-    ) -> String {
-        """
-        Localize this static Meta ad into \(language.localeName).
-
-        Preserve the original ad as closely as possible:
-        - Keep the product, photography, illustration style, composition, crop, aspect ratio, colors, logos, offer structure, and visual hierarchy intact.
-        - Only change visible ad text that needs localization.
-        - Keep brand names, product names, trademarks, promo codes, and legal marks unchanged unless grammar around them needs to change.
-        - Use the live truth packet below as replacement truth for Soundbrenner prices, compare-at prices, discounts, currency symbols, shipping, and Audio Chronicle article names/URLs.
-        - Do not add offer elements that are not already present in the source image. If the source shows only a discount, keep only a discount. If it shows only an amount-off claim, keep only an amount-off claim. If it does not show a shipping threshold, do not add a threshold.
-        - Do not add a compare-at/original price unless the source image already has a visible compare-at/original price.
-        - Do not add shipping text unless the source image already has visible shipping text.
-        - Convert prices only when the live truth packet gives an exact target-market value for the product. Do not invent currency conversions.
-        - If the source image has a visible percent-off claim, replace it with the exact percent-off truth from the live truth packet. Do not invent or preserve stale percent discounts.
-        - If locale phrase guidance uses {percent}, replace it with the live numeric percent. Never render {percent} literally.
-        - For percent-off claims, localize the offer words around the number. In non-English outputs, do not leave English words such as OFF, SITE WIDE, SALE, or UP TO visible; only the digits and % sign may carry over unchanged.
-        - If the source image has itemized bundle component/accessory prices, use the component price truth table to replace matching USD prices with target-market prices. Keep FREE/free claims present when they are visible in the source.
-        - English target markets still require price localization. For English + CAD/AUD/GBP, do not copy through USD source amounts; replace them with the exact target-market amount and currency display from the live truth packet.
-        - Rewrite the copy idiomatically for \(language.localeName), not word-for-word, so it reads like an effective native performance ad.
-        - Match the original meaning, urgency, and persuasive intent.
-        - Fit the localized text into the same approximate text boxes. Use concise native copy where the target language is longer.
-        - Do not invent new claims, discounts, products, badges, UI elements, people, or backgrounds.
-        - Do not translate the Soundbrenner brand name.
-
-        \(truthContext ?? "Live truth packet unavailable. Preserve existing prices and Audio Chronicle titles rather than guessing.")
-
-        \(sourceIntent?.promptContext ?? "Source intent analysis unavailable. Be conservative and only replace clearly visible source text.")
-
-        \(qcFeedback.isEmpty ? "" : "Previous QC attempt failed. Fix these issues exactly:\n- \(qcFeedback.joined(separator: "\n- "))")
-
-        \(language.phraseGuidance)
-
-        Do not leave English ad copy visible unless it is a brand name, product name, URL, promo code, exact price, number, or currency symbol.
-
-        Return the finished localized ad only.
-        """
-    }
-
-    private static func outputFileName(for sourceURL: URL, language: AdLocalizationLanguage, outputFormat: OutputFormat) -> String {
-        let baseName = sourceURL.deletingPathExtension().lastPathComponent
-        return "\(baseName)-\(language.outputCode).\(outputFormat.rawValue)"
-    }
-
-    private static func imageFiles(in folderURL: URL, fileManager: FileManager) throws -> [URL] {
-        let imageExtensions = Set(["png", "jpg", "jpeg", "webp", "heic", "tif", "tiff"])
-        return try fileManager.contentsOfDirectory(
-            at: folderURL,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        )
-        .filter { imageExtensions.contains($0.pathExtension.lowercased()) }
-        .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-    }
-
-    private static func outputSize(for sourceURL: URL) -> String {
-        guard let image = NSImage(contentsOf: sourceURL),
-              let representation = image.representations.first(where: { $0.pixelsWide > 0 && $0.pixelsHigh > 0 }) else {
-            return ResolutionPreset.landscape2k.sizeValue
-        }
-
-        let width = validImageDimension(representation.pixelsWide)
-        let height = validImageDimension(representation.pixelsHigh)
-        return "\(width)x\(height)"
-    }
-
-    private static func validImageDimension(_ value: Int) -> Int {
-        let rounded = Int((Double(value) / 16.0).rounded()) * 16
-        return min(max(rounded, 16), 3840)
-    }
-
-    private func persistAdLocalizationJobs() {
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            encoder.dateEncodingStrategy = .iso8601
-            let data = try encoder.encode(adLocalizationJobs)
-            try data.write(to: adLocalizationJobsURL, options: .atomic)
-        } catch {
-            lastError = error.localizedDescription
-        }
-    }
-
-    private func persistAdLocalizationLanguages() {
-        guard !isRestoringPreferences else {
-            return
-        }
-
-        UserDefaults.standard.set(
-            selectedAdLocalizationLanguages.map(\.rawValue),
-            forKey: Self.selectedAdLocalizationLanguagesKey
-        )
-    }
-
-    private func persistAdLocalizationProduct() {
-        guard !isRestoringPreferences else {
-            return
-        }
-
-        UserDefaults.standard.set(
-            selectedAdLocalizationProduct.rawValue,
-            forKey: Self.selectedAdLocalizationProductKey
-        )
-    }
-
-    private func persistAdLocalizationAudioChronicleURL() {
-        guard !isRestoringPreferences else {
-            return
-        }
-
-        UserDefaults.standard.set(
-            adLocalizationAudioChronicleURL.trimmingCharacters(in: .whitespacesAndNewlines),
-            forKey: Self.adLocalizationAudioChronicleURLKey
-        )
-    }
-
-    private func sendAdLocalizationNotification(succeededCount: Int, skippedCount: Int, failedCount: Int) {
-        let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert, .sound]) { isAllowed, _ in
-            guard isAllowed else {
-                return
-            }
-
-            let content = UNMutableNotificationContent()
-            content.title = "Soundbrenner Pixel"
-            content.body = failedCount == 0
-                ? "Ad localization complete: \(succeededCount) image\(succeededCount == 1 ? "" : "s")\(skippedCount > 0 ? ", \(skippedCount) skipped" : "")."
-                : "Ad localization finished with \(failedCount) failure\(failedCount == 1 ? "" : "s")."
-            content.sound = .default
-
-            let request = UNNotificationRequest(
-                identifier: "ad-localization-\(UUID().uuidString)",
-                content: content,
-                trigger: nil
-            )
-            center.add(request)
         }
     }
 
@@ -7517,98 +5487,33 @@ final class AppModel: ObservableObject {
         return directory
     }
 
-    private static func appSupportFile(named fileName: String) -> URL {
-        let fileManager = FileManager.default
-        let base = try! fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        let directory = base.appendingPathComponent("SoundbrennerMediaGenerator", isDirectory: true)
-        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent(fileName)
-    }
-
-    private static func loadAdLocalizationJobs(from url: URL) -> [AdLocalizationJob] {
-        guard FileManager.default.fileExists(atPath: url.path),
-              let data = try? Data(contentsOf: url) else {
-            return []
-        }
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let jobs = (try? decoder.decode([AdLocalizationJob].self, from: data)) ?? []
-        return jobs.map { job in
-            var recoveredJob = job
-            if recoveredJob.status == .running || recoveredJob.status == .queued {
-                recoveredJob.status = .failed
-                recoveredJob.errorMessage = "Localization was interrupted before this image finished."
-                recoveredJob.updatedAt = .now
-            }
-            return recoveredJob
-        }
-    }
-
-    private static func loadAdLocalizationLanguages() -> Set<AdLocalizationLanguage> {
-        let rawValues = UserDefaults.standard.stringArray(forKey: selectedAdLocalizationLanguagesKey) ?? []
-        let supportedLanguages = Set(AdLocalizationLanguage.allCases)
-        let languages = Set(rawValues.compactMap(AdLocalizationLanguage.init(rawValue:))).intersection(supportedLanguages)
-        return languages.isEmpty ? [.germanEUR] : languages
-    }
-
-    private static func loadAdLocalizationProduct() -> AdLocalizationProduct {
-        guard let rawValue = UserDefaults.standard.string(forKey: selectedAdLocalizationProductKey),
-              let product = AdLocalizationProduct(rawValue: rawValue) else {
-            return .none
-        }
-        return product
-    }
-
-    private static func loadAdLocalizationAudioChronicleURL() -> String {
-        UserDefaults.standard.string(forKey: adLocalizationAudioChronicleURLKey) ?? ""
-    }
-
-    private static func loadAdLocalizationFolderURL() -> URL? {
-        guard let bookmarkData = UserDefaults.standard.data(forKey: adLocalizationFolderBookmarkKey) else {
-            return nil
-        }
-
-        var isStale = false
-        guard let resolvedURL = try? URL(
-            resolvingBookmarkData: bookmarkData,
-            options: .withSecurityScope,
-            relativeTo: nil,
-            bookmarkDataIsStale: &isStale
-        ) else {
-            return nil
-        }
-
-        _ = resolvedURL.startAccessingSecurityScopedResource()
-        if isStale,
-           let refreshedData = try? resolvedURL.bookmarkData(
-            options: .withSecurityScope,
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-           ) {
-            UserDefaults.standard.set(refreshedData, forKey: adLocalizationFolderBookmarkKey)
-        }
-        return resolvedURL
-    }
-
-    private func generationAPIKey(for form: GenerationForm) throws -> String {
+    private func generationCredential(for form: GenerationForm) throws -> GenerationCredential {
         if form.imageModel.isGeminiImageModel {
             let trimmedKey = geminiAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedKey.isEmpty else {
                 throw AppError.missingGeminiAPIKey
             }
-            return trimmedKey
+            return .gemini(trimmedKey)
         }
+        return try openAICredential()
+    }
 
+    private func openAICredential() throws -> GenerationCredential {
+        if let session = teamSession {
+            guard !session.isExpired, !teamSessionNeedsSignIn else {
+                throw TeamAccessError(status: 401, message: "Your Soundbrenner session has expired. Sign in again.")
+            }
+            return .team(session.token)
+        }
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKey.isEmpty else {
             throw AppError.missingAPIKey
         }
-        return trimmedKey
+        return .personalOpenAI(trimmedKey)
     }
 
     private func generateWithRetry(
-        apiKey: String,
+        credential: GenerationCredential,
         form: GenerationForm,
         referenceImageURLs: [URL],
         pendingID: UUID?,
@@ -7639,15 +5544,15 @@ final class AppModel: ObservableObject {
                     )
                 }
 
-                let payloads = if workingForm.imageModel.isGeminiImageModel {
+                let payloads = if case .gemini(let key) = credential {
                     try await geminiService.generateImages(
-                        apiKey: apiKey,
+                        apiKey: key,
                         form: workingForm,
                         referenceImageURLs: referenceImageURLs
                     )
                 } else {
                     try await service.generateImages(
-                        apiKey: apiKey,
+                        credential: credential,
                         form: workingForm,
                         referenceImageURLs: referenceImageURLs
                     )

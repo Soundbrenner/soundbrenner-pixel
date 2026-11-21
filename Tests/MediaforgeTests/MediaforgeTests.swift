@@ -1,12 +1,74 @@
 import Foundation
 import Testing
-@testable import SoundbrennerPixel
+@testable import Mediaforge
+
+@Test @MainActor func galleryPreservesHistoryWhenPendingRecordsAreUnreadable() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let historyURL = directory.appendingPathComponent("jobs.json")
+    let pendingURL = directory.appendingPathComponent("pending-jobs.json")
+    let history = Data("""
+        [{
+          "id": "71E0B637-6BB0-4870-BBA4-92E6898D8C37",
+          "createdAt": "2026-11-09T08:26:00Z",
+          "prompt": "A musician rehearsing",
+          "quality": "medium",
+          "resolution": "landscape2k",
+          "imageCount": 1,
+          "outputFormat": "png",
+          "moderation": "low",
+          "images": []
+        }]
+        """.utf8)
+    try history.write(to: historyURL)
+    try Data("invalid pending records".utf8).write(to: pendingURL)
+    let store = GalleryStore(baseURL: directory)
+
+    let job = try #require(store.jobs.first)
+    #expect(store.historyError != nil)
+    #expect(throws: AppError.self) { try store.delete(job: job) }
+    let historyAfterFailure = try Data(contentsOf: historyURL)
+    #expect(historyAfterFailure == history)
+
+    try Data("[]".utf8).write(to: pendingURL)
+    store.loadHistory()
+    #expect(store.historyError == nil)
+    #expect(store.jobs == [job])
+}
+
+@Test @MainActor func galleryReportsUnreadableHistoryAndLoadsItOnRetry() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let historyURL = directory.appendingPathComponent("jobs.json")
+    try Data("invalid history".utf8).write(to: historyURL)
+    let store = GalleryStore(baseURL: directory)
+    #expect(store.historyError != nil)
+    #expect(throws: AppError.self) { try store.requireLoadedHistory() }
+
+    try Data("[]".utf8).write(to: historyURL)
+    store.loadHistory()
+    #expect(store.historyError == nil)
+    #expect(store.jobs.isEmpty)
+}
 
 @Test func promptSearchMatchesWordsIgnoringCaseAndAccents() {
     #expect(PromptSearch.matches("A guitarist in a café", query: "CAFE guitarist"))
     #expect(PromptSearch.matches("Any prompt", query: "  \n "))
     #expect(!PromptSearch.matches("A guitarist", query: "guitarist drums"))
     #expect(!PromptSearch.matches("", query: "guitar"))
+}
+
+@Test func galleryTitlesSummarizeStructuredPromptsWithoutChangingFreeText() {
+    let campaign = #"{"scene_configuration":{"seasonal_customization":{"theme_name":"BFCM Sale"},"environment":{"location":"Rehearsal studio"}}}"#
+    #expect(GalleryPromptTitle.text(for: campaign) == "BFCM Sale")
+    #expect(GalleryPromptTitle.text(for: #"{"title":" Drum practice ","prompt":"A rehearsal"}"#) == "Drum practice")
+    #expect(GalleryPromptTitle.text(for: #"{"unknown":true}"#) == "Structured prompt")
+    #expect(GalleryPromptTitle.text(for: "A guitar\nin a café") == "A guitar\nin a café")
+    #expect(GalleryPromptTitle.text(for: "{a handwritten prompt}") == "{a handwritten prompt}")
 }
 
 @Test func pngRequestsOmitCompression() async throws {
@@ -26,56 +88,6 @@ import Testing
     form.imageCount = 99
 
     #expect(form.requestBody.n == 8)
-}
-
-@Test func adLocalizationMarketsMatchApprovedSet() async throws {
-    #expect(AdLocalizationLanguage.allCases.map(\.title) == [
-        "English + GBP",
-        "English + AUD",
-        "English + CAD",
-        "German + EUR",
-        "French + EUR",
-        "Spanish + EUR",
-        "Italian + EUR",
-        "Japanese + JPY",
-        "Korean + KRW"
-    ])
-}
-
-@Test func legacyGermanAdLocalizationPreferenceMigratesToGermanEUR() async throws {
-    let data = try JSONEncoder().encode("german")
-    let decoded = try JSONDecoder().decode(AdLocalizationLanguage.self, from: data)
-
-    #expect(decoded == .germanEUR)
-}
-
-@Test func legacyEnglishUSDMarketIsHiddenFromSelectableOutputs() async throws {
-    let data = try JSONEncoder().encode("englishUSD")
-    let decoded = try JSONDecoder().decode(AdLocalizationLanguage.self, from: data)
-
-    #expect(decoded == .englishUSD)
-    #expect(!AdLocalizationLanguage.allCases.contains(.englishUSD))
-}
-
-@Test func adLocalizationProductsMatchShopifyProductSet() async throws {
-    #expect(AdLocalizationProduct.allCases.map(\.title) == [
-        "None",
-        "Wave",
-        "Wave Pro",
-        "Spark",
-        "Pulse"
-    ])
-    #expect(AdLocalizationProduct.wavePro.productID == "soundbrenner-wave-pro-in-ear-monitors")
-    #expect(AdLocalizationProduct.wavePro.shopifyProductID == "9187329835259")
-}
-
-@Test func japaneseAdLocalizationGuidanceLocalizesPercentOffClaims() async throws {
-    let guidance = AdLocalizationLanguage.japaneseJPY.phraseGuidance
-
-    #expect(guidance.contains("\"{percent}% OFF\" -> \"{percent}%オフ\""))
-    #expect(guidance.contains("\"UP TO {percent}% OFF\" -> \"最大{percent}%オフ\""))
-    #expect(guidance.contains("\"{percent}% OFF SITE WIDE\" -> \"全品{percent}%オフ\""))
-    #expect(!guidance.contains("43%"))
 }
 
 @Test func referenceLikenessSafetyRuleBlocksCopyingPeopleFromReferences() async throws {

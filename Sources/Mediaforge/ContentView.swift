@@ -4,32 +4,108 @@ import UniformTypeIdentifiers
 import SwiftUI
 
 private extension Color {
-    static let soundbrennerPrimary500 = Color(
-        red: 0 / 255,
-        green: 181 / 255,
-        blue: 156 / 255
-    )
+    // The light gradient stop in Mediaforge.icon, #FAF5E9 in sRGB.
+    static let mediaforgeCream = Color(red: 250 / 255, green: 245 / 255, blue: 233 / 255)
+    static let mediaforgeCreamHovered = Color(red: 230 / 255, green: 211 / 255, blue: 175 / 255)
+    static let mediaforgeAccent = Color(nsColor: NSColor(name: nil) { appearance in
+        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+            return NSColor(srgbRed: 232 / 255, green: 220 / 255, blue: 199 / 255, alpha: 1)
+        }
+        return NSColor(srgbRed: 117 / 255, green: 86 / 255, blue: 47 / 255, alpha: 1)
+    })
+}
+
+private struct MediaforgeActionStyle: PrimitiveButtonStyle {
+    var prominent = false
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.appearsActive) private var appearsActive
+    @State private var isLegacyButtonHovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        if #available(macOS 26.0, *) {
+            if prominent {
+                Button(role: configuration.role, action: configuration.trigger) {
+                    configuration.label.foregroundStyle(
+                        isEnabled ? (appearsActive ? Color.black : Color.primary) : Color.secondary
+                    )
+                }
+                .buttonStyle(.glassProminent)
+                .buttonBorderShape(.capsule)
+                .tint(.mediaforgeCream)
+                .modifier(ColoredGlassHover())
+            } else {
+                Button(role: configuration.role, action: configuration.trigger) {
+                    configuration.label.foregroundStyle(isEnabled ? Color.primary : Color.secondary)
+                }
+                .buttonStyle(.glass)
+                .buttonBorderShape(.capsule)
+                .tint(.clear)
+            }
+        } else if prominent {
+            Button(role: configuration.role, action: configuration.trigger) {
+                configuration.label
+                    .foregroundStyle(isEnabled ? Color.black : Color.secondary)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(isEnabled && appearsActive && isLegacyButtonHovered ? .mediaforgeCreamHovered : .mediaforgeCream)
+            .onHover { isLegacyButtonHovered = $0 }
+        } else {
+            Button(role: configuration.role, action: configuration.trigger) {
+                configuration.label
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+}
+
+private struct ColoredGlassHover: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered = false
+
+    private var showsHighlight: Bool { isHovered && isEnabled }
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                Capsule().fill(Color.black.opacity(showsHighlight ? 0.07 : 0))
+                    .allowsHitTesting(false)
+            }
+            .onHover { isHovered = $0 }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: showsHighlight)
+    }
+}
+
+private struct GeneratorFooterPlacement<Footer: View>: ViewModifier {
+    let footer: Footer
+
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.safeAreaBar(edge: .bottom, spacing: 0) { footer }
+        } else {
+            content.safeAreaInset(edge: .bottom, spacing: 0) {
+                footer.background(.bar)
+            }
+        }
+    }
+}
+
+private extension View {
+    func workspaceSection() -> some View {
+        padding(14)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14)
+                    .strokeBorder(Color.primary.opacity(0.08))
+                    .allowsHitTesting(false)
+            }
+    }
 }
 
 private enum SidebarLayout {
     static let minWidth: CGFloat = 380
-    static let defaultWidth: Double = 460
+    static let idealWidth: CGFloat = 460
     static let maxWidth: CGFloat = 560
-
-    static func clampedWidth(_ width: CGFloat) -> CGFloat {
-        min(max(width, minWidth), maxWidth)
-    }
-}
-
-private struct SidebarWidthPreferenceKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        let next = nextValue()
-        if next > 0 {
-            value = next
-        }
-    }
 }
 
 private struct MultiSelectOption<ID: Hashable>: Identifiable {
@@ -37,7 +113,7 @@ private struct MultiSelectOption<ID: Hashable>: Identifiable {
     let title: String
 }
 
-private struct PersistentMultiSelectMenu<ID: Hashable>: View {
+private struct MultiSelectionMenu<ID: Hashable>: View {
     let selectionTitle: String
     let emptyTitle: String
     let options: [MultiSelectOption<ID>]
@@ -46,77 +122,23 @@ private struct PersistentMultiSelectMenu<ID: Hashable>: View {
     let onClear: () -> Void
     let onToggle: (ID) -> Void
 
-    @State private var isPresented = false
-
     var body: some View {
-        Button {
-            isPresented.toggle()
-        } label: {
-            HStack {
-                Text(selectionTitle)
-                    .lineLimit(1)
-                Spacer()
-                Image(systemName: "chevron.down")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .buttonStyle(.bordered)
-        .disabled(isDisabled)
-        .popover(isPresented: $isPresented, arrowEdge: .trailing) {
-            VStack(alignment: .leading, spacing: 0) {
-                optionButton(
-                    title: emptyTitle,
-                    isSelected: selectedIDs.isEmpty,
-                    action: onClear
-                )
+        Menu(selectionTitle) {
+            Button(emptyTitle, action: onClear)
+                .disabled(selectedIDs.isEmpty)
 
+            if !options.isEmpty {
                 Divider()
-                    .padding(.vertical, 4)
-
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(options) { option in
-                            optionButton(
-                                title: option.title,
-                                isSelected: selectedIDs.contains(option.id)
-                            ) {
-                                onToggle(option.id)
-                            }
-                        }
-                    }
-                }
-                .frame(maxHeight: 340)
             }
-            .padding(6)
-            .frame(width: 320)
-        }
-    }
 
-    private func optionButton(
-        title: String,
-        isSelected: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: "checkmark")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.soundbrennerPrimary500)
-                    .opacity(isSelected ? 1 : 0)
-                    .frame(width: 14)
-
-                Text(title)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-
-                Spacer(minLength: 8)
+            ForEach(options) { option in
+                Toggle(option.title, isOn: Binding(
+                    get: { selectedIDs.contains(option.id) },
+                    set: { _ in onToggle(option.id) }
+                ))
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .disabled(isDisabled)
     }
 }
 
@@ -129,9 +151,12 @@ struct ContentView: View {
     @EnvironmentObject private var adAngleStore: AdAngleStore
     @EnvironmentObject private var promotionalContextStore: PromotionalContextStore
     @EnvironmentObject private var promptPresetStore: PromptPresetStore
-    @AppStorage("generator_sidebar_width") private var sidebarWidth = SidebarLayout.defaultWidth
     @State private var previewedImage: GalleryPreviewItem?
+    @State private var previewedPrompt: GalleryPromptPreview?
     @State private var promptSearch = ""
+    @State private var isTeamSignInPresented = false
+    @State private var teamEmail = ""
+    @State private var teamPassword = ""
 
     private let columns = [
         GridItem(.adaptive(minimum: 220, maximum: 320), spacing: 16)
@@ -140,35 +165,25 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView {
             GeneratorSidebar()
+                // Let the split view own the live divider position.
                 .navigationSplitViewColumnWidth(
                     min: SidebarLayout.minWidth,
-                    ideal: CGFloat(sidebarWidth),
+                    ideal: SidebarLayout.idealWidth,
                     max: SidebarLayout.maxWidth
                 )
-                .background {
-                    GeometryReader { proxy in
-                        Color.clear.preference(
-                            key: SidebarWidthPreferenceKey.self,
-                            value: proxy.size.width
-                        )
-                    }
-                }
         } detail: {
-            detail
+            searchableGallery.navigationTitle("Gallery")
         }
         .navigationSplitViewStyle(.balanced)
-        .onPreferenceChange(SidebarWidthPreferenceKey.self) { width in
-            guard width.isFinite, width >= SidebarLayout.minWidth else {
-                return
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                accountMenu
             }
-
-            let clampedWidth = SidebarLayout.clampedWidth(width)
-            guard abs(sidebarWidth - Double(clampedWidth)) > 1 else {
-                return
-            }
-
-            sidebarWidth = Double(clampedWidth)
         }
+        .sheet(isPresented: $isTeamSignInPresented, onDismiss: { teamPassword = "" }) {
+            teamSignIn
+        }
+        .task { await appModel.verifyTeamSession() }
         .sheet(isPresented: $appModel.isModelManagerPresented) {
             ModelManagerSheet()
                 .environmentObject(promptModelStore)
@@ -179,6 +194,102 @@ struct ContentView: View {
         }
         .sheet(item: $previewedImage) { item in
             ImagePreviewSheet(item: item)
+        }
+        .sheet(item: $previewedPrompt) { item in
+            GalleryPromptSheet(item: item)
+        }
+    }
+
+    @ViewBuilder
+    private var searchableGallery: some View {
+        if #available(macOS 26.0, *) {
+            detail.searchable(text: $promptSearch, placement: .toolbar, prompt: "Search prompts")
+        } else {
+            detail.searchable(text: $promptSearch, prompt: "Search prompts")
+        }
+    }
+
+    private var accountMenu: some View {
+        Menu {
+            if let session = appModel.teamSession {
+                Text(session.member.name)
+                if appModel.teamSessionNeedsSignIn || session.isExpired {
+                    Button("Log in again") { isTeamSignInPresented = true }
+                } else {
+                    let budget = Double(session.monthlyLimitCents) / 100
+                    Text("\(budget, format: .currency(code: "USD")) monthly OpenAI limit")
+                }
+                Divider()
+                Button("Log out") { Task { await appModel.signOutOfTeam() } }
+            } else {
+                Button("Log in with Soundbrenner") { isTeamSignInPresented = true }
+            }
+            if let message = appModel.teamAccessMessage {
+                Text(message)
+            }
+        } label: {
+            Label("Soundbrenner account", systemImage: "person.crop.circle")
+        }
+        .help("Soundbrenner account")
+        .disabled(appModel.isChangingTeamSession || appModel.isGenerating)
+    }
+
+    private var teamSignIn: some View {
+        VStack(spacing: 20) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable().interpolation(.high)
+                .frame(width: 64, height: 64)
+                .accessibilityHidden(true)
+            Text("Log in to Mediaforge").font(.title.weight(.semibold))
+            Form {
+                TextField("", text: $teamEmail, prompt: Text("Soundbrenner email"))
+                    .accessibilityLabel("Soundbrenner email")
+                    .textContentType(.username)
+                SecureField("", text: $teamPassword, prompt: Text("Password"))
+                    .accessibilityLabel("Password")
+                    .textContentType(.password)
+            }
+            .labelsHidden()
+            .multilineTextAlignment(.leading)
+            .formStyle(.grouped)
+            .scrollDisabled(true)
+            .fixedSize(horizontal: false, vertical: true)
+
+            if let message = appModel.teamAccessMessage {
+                Text(message).font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 20)
+            }
+
+            Button(action: logInToTeam) {
+                HStack(spacing: 8) {
+                    if appModel.isChangingTeamSession { ProgressView().controlSize(.small) }
+                    Text(appModel.isChangingTeamSession ? "Logging in…" : "Log in")
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(MediaforgeActionStyle(prominent: true))
+            .controlSize(.large)
+            .keyboardShortcut(.defaultAction)
+            .disabled(teamEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || teamPassword.isEmpty)
+            .padding(.horizontal, 20)
+
+            Button("Cancel") { teamPassword = ""; isTeamSignInPresented = false }
+                .buttonStyle(.link)
+                .keyboardShortcut(.cancelAction)
+        }
+        .disabled(appModel.isChangingTeamSession)
+        .interactiveDismissDisabled(appModel.isChangingTeamSession)
+        .frame(width: 360)
+        .padding(24)
+    }
+
+    private func logInToTeam() {
+        let password = teamPassword
+        teamPassword = ""
+        Task {
+            await appModel.signInToTeam(email: teamEmail, password: password)
+            if appModel.teamAccessMessage == nil { isTeamSignInPresented = false }
         }
     }
 }
@@ -220,6 +331,8 @@ private struct GeneratorSidebar: View {
     @State private var formDraft = GenerationForm()
     @State private var apiKeyDraft = ""
     @State private var geminiAPIKeyDraft = ""
+    @AppStorage("generator_connection_settings_expanded") private var showsConnections = false
+    @AppStorage("generator_output_settings_expanded") private var showsOutputSettings = true
     @State private var hasLoadedDraft = false
     @State private var draftPersistenceTask: Task<Void, Never>?
     @State private var previewedReferenceImage: GalleryPreviewItem?
@@ -229,206 +342,12 @@ private struct GeneratorSidebar: View {
 
     private var sidebar: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                Text("Soundbrenner Pixel")
-                    .font(.largeTitle.bold())
-
-                Picker("Mode", selection: $appModel.generatorMode) {
-                    ForEach(GeneratorMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-
-                if appModel.generatorMode == .adLocalization {
-                    adLocalizationControls
-                } else {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Prompt")
-                        .font(.headline)
-
-                    TextEditor(text: $formDraft.prompt)
-                        .font(.body)
-                        .frame(minHeight: 140)
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.secondary.opacity(0.25))
-                        }
-                }
-
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("Reference photos")
-                            .font(.headline)
-                        Spacer()
-                        Button("Add photos") {
-                            appModel.addReferenceImages()
-                        }
-                    }
-
-                    if appModel.referenceImageURLs.isEmpty {
-                        Text("No extra reference photos attached.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(appModel.referenceImageURLs, id: \.self) { url in
-                            ReferencePhotoRow(
-                                fileURL: url,
-                                title: url.lastPathComponent,
-                                openAction: {
-                                    previewedReferenceImage = ImagePreviewFactory.item(for: url)
-                                },
-                                removeAction: {
-                                    appModel.removeReferenceImage(url)
-                                }
-                            )
-                        }
-                    }
-                }
-
-                shotModeSelector
-
-                if formDraft.shotMode.usesAudienceSelection {
-                    audienceSelector
-                }
-
-                if formDraft.shotMode != .plain {
-                    layeredPresetSelectors
-                }
-
-                if appModel.generatorMode == .regular {
-                    Picker("Quality", selection: $formDraft.quality) {
-                        ForEach(ImageQuality.supported(by: formDraft.imageModel)) { quality in
-                            Text(quality.title).tag(quality)
-                        }
-                    }
-                    .disabled(formDraft.imageModel.isGeminiImageModel)
-
-                    if formDraft.imageModel.isGeminiImageModel {
-                        Picker("Aspect ratio", selection: $formDraft.geminiAspectRatio) {
-                            ForEach(GeminiAspectRatio.allCases) { aspectRatio in
-                                Text(aspectRatio.title).tag(aspectRatio)
-                            }
-                        }
-
-                        Picker("Resolution", selection: $formDraft.geminiImageSize) {
-                            ForEach(GeminiImageSize.allCases) { imageSize in
-                                Text(imageSize.title).tag(imageSize)
-                            }
-                        }
-                    } else {
-                        Picker("Resolution", selection: $formDraft.resolution) {
-                            ForEach(ResolutionPreset.allCases) { preset in
-                                Text("\(preset.title) • \(preset.subtitle)")
-                                    .tag(preset)
-                            }
-                        }
-                    }
-
-                    Text(
-                        formDraft.imageModel.isGeminiImageModel
-                            ? "Nano Banana Pro currently costs about $0.134 per 1K/2K image and $0.24 per 4K image."
-                            : "Image cost depends on the model, quality, size, and reference images."
-                    )
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-
-                    Stepper(value: $formDraft.imageCount, in: 1...8) {
-                        HStack {
-                            Text("Images")
-                            Spacer()
-                            Text("\(formDraft.imageCount)")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                Picker("Format", selection: $formDraft.outputFormat) {
-                    ForEach(OutputFormat.allCases) { format in
-                        Text(format.title).tag(format)
-                    }
-                }
-                .disabled(formDraft.imageModel.isGeminiImageModel)
-
-                if formDraft.outputFormat != .png {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("Compression")
-                            Spacer()
-                            Text("\(formDraft.outputCompression)%")
-                                .foregroundStyle(.secondary)
-                        }
-                        Slider(value: Binding(
-                            get: { Double(formDraft.outputCompression) },
-                            set: { formDraft.outputCompression = Int($0.rounded()) }
-                        ), in: 0...100, step: 1)
-                    }
-                }
-
-                if appModel.generatorMode == .regular {
-                    Picker("Moderation", selection: $formDraft.moderation) {
-                        ForEach(ModerationLevel.allCases) { level in
-                            Text(level.title).tag(level)
-                        }
-                    }
-                    .disabled(formDraft.imageModel.isGeminiImageModel)
-
-                    imageModelSelector
-                }
-
-                Divider()
-                    .padding(.vertical, 4)
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Shared JSON folder")
-                        .font(.headline)
-
-                    Text(sharedProfileFolderStatus)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-
-                    Button("Choose Dropbox folder") {
-                        chooseSharedProfileFolder()
-                    }
-                }
-
-                Divider()
-                    .padding(.vertical, 4)
-
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("API keys")
-                        .font(.headline)
-
-                    Text("OpenAI")
-                        .font(.subheadline.weight(.semibold))
-                    SecureField("sk-...", text: $apiKeyDraft)
-                        .textFieldStyle(.roundedBorder)
-
-                    Button("Save OpenAI key securely") {
-                        appModel.apiKey = apiKeyDraft
-                        appModel.saveAPIKey()
-                    }
-
-                    Divider()
-
-                    Text("Gemini · Nano Banana Pro")
-                        .font(.subheadline.weight(.semibold))
-                    SecureField("Gemini API key", text: $geminiAPIKeyDraft)
-                        .textFieldStyle(.roundedBorder)
-
-                    Button("Save Gemini key securely") {
-                        appModel.geminiAPIKey = geminiAPIKeyDraft
-                        appModel.saveGeminiAPIKey()
-                    }
-                }
-                }
+            VStack(alignment: .leading, spacing: 22) {
+                generationControls
             }
             .padding(20)
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            generationFooter
-        }
+        .modifier(GeneratorFooterPlacement(footer: generationFooter))
         .onAppear {
             // Stores restore their startup caches during initialization. Reloading
             // cloud-backed libraries here blocks the first window and defeats them.
@@ -479,18 +398,196 @@ private struct GeneratorSidebar: View {
     }
 
     var body: some View {
-        sidebar
+        sidebar.tint(.mediaforgeAccent)
+    }
+
+    @ViewBuilder
+    private var generationControls: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("Prompt")
+                .font(.headline)
+
+            TextEditor(text: $formDraft.prompt)
+                .font(.body)
+                .frame(height: 182)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(Color.primary.opacity(0.12))
+                        .allowsHitTesting(false)
+                }
+                .accessibilityLabel("Prompt")
+                .accessibilityHint("Describe the image you want to create.")
+        }
+
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Reference photos")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    appModel.addReferenceImages()
+                } label: {
+                    Label("Add photos", systemImage: "plus")
+                }
+                .buttonStyle(MediaforgeActionStyle())
+            }
+
+            ForEach(appModel.referenceImageURLs, id: \.self) { url in
+                ReferencePhotoRow(
+                    fileURL: url,
+                    title: url.lastPathComponent,
+                    openAction: {
+                        previewedReferenceImage = ImagePreviewFactory.item(for: url)
+                    },
+                    removeAction: {
+                        appModel.removeReferenceImage(url)
+                    }
+                )
+            }
+        }
+
+        shotModeSelector
+
+        if formDraft.shotMode.usesAudienceSelection {
+            audienceSelector
+        }
+
+        if formDraft.shotMode != .plain {
+            layeredPresetSelectors
+        }
+
+        DisclosureGroup("Output settings", isExpanded: $showsOutputSettings) {
+            VStack(alignment: .leading, spacing: 14) {
+                imageModelSelector
+                Picker("Quality", selection: $formDraft.quality) {
+                    ForEach(ImageQuality.supported(by: formDraft.imageModel)) { quality in
+                        Text(quality.title).tag(quality)
+                    }
+                }
+                .disabled(formDraft.imageModel.isGeminiImageModel)
+
+                if formDraft.imageModel.isGeminiImageModel {
+                    Picker("Aspect ratio", selection: $formDraft.geminiAspectRatio) {
+                        ForEach(GeminiAspectRatio.allCases) { aspectRatio in
+                            Text(aspectRatio.title).tag(aspectRatio)
+                        }
+                    }
+
+                    Picker("Resolution", selection: $formDraft.geminiImageSize) {
+                        ForEach(GeminiImageSize.allCases) { imageSize in
+                            Text(imageSize.title).tag(imageSize)
+                        }
+                    }
+                    .help("Nano Banana Pro costs about $0.134 per 1K or 2K image and $0.24 per 4K image.")
+                } else {
+                    Picker("Resolution", selection: $formDraft.resolution) {
+                        ForEach(ResolutionPreset.allCases) { preset in
+                            Text("\(preset.title) • \(preset.subtitle)")
+                                .tag(preset)
+                        }
+                    }
+                }
+
+                Stepper(value: $formDraft.imageCount, in: 1...8) {
+                    HStack {
+                        Text("Images")
+                        Spacer()
+                        Text("\(formDraft.imageCount)")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Picker("Format", selection: $formDraft.outputFormat) {
+                    ForEach(OutputFormat.allCases) { format in
+                        Text(format.title).tag(format)
+                    }
+                }
+                .disabled(formDraft.imageModel.isGeminiImageModel)
+
+                if formDraft.outputFormat != .png {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Compression")
+                            Spacer()
+                            Text("\(formDraft.outputCompression)%")
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(value: Binding(
+                            get: { Double(formDraft.outputCompression) },
+                            set: { formDraft.outputCompression = Int($0.rounded()) }
+                        ), in: 0...100, step: 1)
+                    }
+                }
+
+                Picker("Moderation", selection: $formDraft.moderation) {
+                    ForEach(ModerationLevel.allCases) { level in
+                        Text(level.title).tag(level)
+                    }
+                }
+                .disabled(formDraft.imageModel.isGeminiImageModel)
+            }
+            .padding(.top, 10)
+        }
+        .workspaceSection()
+
+        DisclosureGroup("Connections", isExpanded: $showsConnections) {
+            VStack(alignment: .leading, spacing: 15) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Shared JSON folder")
+                        .font(.headline)
+
+                    Text(sharedProfileFolderStatus)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    Button("Choose Dropbox folder") {
+                        chooseSharedProfileFolder()
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Personal API keys")
+                        .font(.headline)
+
+                    Text("OpenAI")
+                        .font(.subheadline.weight(.semibold))
+                    SecureField("sk-...", text: $apiKeyDraft)
+                        .textFieldStyle(.roundedBorder)
+
+                    Button("Save OpenAI key securely") {
+                        appModel.apiKey = apiKeyDraft
+                        appModel.saveAPIKey()
+                    }
+
+                    Divider()
+
+                    Text("Gemini · Nano Banana Pro")
+                        .font(.subheadline.weight(.semibold))
+                    SecureField("Gemini API key", text: $geminiAPIKeyDraft)
+                        .textFieldStyle(.roundedBorder)
+
+                    Button("Save Gemini key securely") {
+                        appModel.geminiAPIKey = geminiAPIKeyDraft
+                        appModel.saveGeminiAPIKey()
+                    }
+                }
+            }
+            .padding(.top, 10)
+        }
+        .workspaceSection()
     }
 
     private var generationFooter: some View {
         VStack(alignment: .leading, spacing: 8) {
             Button(action: startGeneration) {
-                Text(appModel.generatorMode == .adLocalization ? "Generate localized ads" : "Generate images")
+                Label("Generate images", systemImage: "sparkles")
+                    .fontWeight(.semibold)
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(MediaforgeActionStyle(prominent: true))
             .controlSize(.large)
-            .disabled(appModel.generatorMode == .adLocalization && appModel.isAdLocalizationRunning)
+            .disabled(galleryStore.historyError != nil)
 
             if let error = appModel.lastError {
                 Text(error)
@@ -507,137 +604,11 @@ private struct GeneratorSidebar: View {
         .padding(.horizontal, 20)
         .padding(.top, 12)
         .padding(.bottom, 14)
-        .background(.bar)
-        .overlay(alignment: .top) {
-            Divider()
-        }
-    }
-
-    private var adLocalizationControls: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Ad folder")
-                    .font(.headline)
-
-                Button {
-                    appModel.chooseAdLocalizationFolder()
-                } label: {
-                    HStack {
-                        Image(systemName: "folder")
-                        Text(appModel.adLocalizationFolderURL?.lastPathComponent ?? "Choose folder")
-                        Spacer()
-                    }
-                }
-
-                if let folderURL = appModel.adLocalizationFolderURL {
-                    Text(folderURL.path)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Language + currency")
-                    .font(.headline)
-
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), alignment: .leading)], alignment: .leading, spacing: 8) {
-                    ForEach(AdLocalizationLanguage.allCases) { market in
-                        Toggle(market.title, isOn: Binding(
-                            get: { appModel.selectedAdLocalizationLanguages.contains(market) },
-                            set: { _ in appModel.toggleAdLocalizationLanguage(market) }
-                        ))
-                        .toggleStyle(.checkbox)
-                    }
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Truth data")
-                    .font(.headline)
-
-                Picker("Product", selection: $appModel.selectedAdLocalizationProduct) {
-                    ForEach(AdLocalizationProduct.allCases) { product in
-                        Text(product.title).tag(product)
-                    }
-                }
-                .pickerStyle(.menu)
-
-                Text("Select a product only when the ad mentions its price or savings. Use None for mixed-product ads or ads without product-specific pricing.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-
-                TextField(
-                    "Audio Chronicle link",
-                    text: $appModel.adLocalizationAudioChronicleURL
-                )
-                .textFieldStyle(.roundedBorder)
-
-                Text("Add a link only when the ad mentions an Audio Chronicle article title. Otherwise leave this empty.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Batch")
-                    .font(.headline)
-
-                Text(appModel.adLocalizationProgressText)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-
-                if appModel.isAdLocalizationRunning {
-                    ProgressView()
-                }
-
-                if !appModel.adLocalizationFailures.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Failures")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.orange)
-
-                        ForEach(appModel.adLocalizationFailures) { failure in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("\(failure.sourceFileName) · \(failure.languageTitle)")
-                                    .font(.footnote.weight(.semibold))
-                                Text(failure.message)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(3)
-                            }
-                            .padding(8)
-                            .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                        }
-                    }
-                }
-            }
-
-            Divider()
-                .padding(.vertical, 4)
-
-            VStack(alignment: .leading, spacing: 12) {
-                Text("OpenAI API key")
-                    .font(.headline)
-
-                SecureField("sk-...", text: $apiKeyDraft)
-                    .textFieldStyle(.roundedBorder)
-
-                Button("Save OpenAI key securely") {
-                    appModel.apiKey = apiKeyDraft
-                    appModel.saveAPIKey()
-                }
-            }
-        }
     }
 
     private func startGeneration() {
         appModel.apiKey = apiKeyDraft
         appModel.geminiAPIKey = geminiAPIKeyDraft
-        if appModel.generatorMode == .adLocalization {
-            appModel.startAdLocalization()
-            return
-        }
-
         appModel.generate(
             form: formDraft,
             using: galleryStore,
@@ -765,6 +736,7 @@ private struct GeneratorSidebar: View {
                 }
             }
             .labelsHidden()
+            .help(ImageModelOption(id: formDraft.imageModel).guidance)
             .onChange(of: formDraft.imageModel) { _, newModel in
                 if !ImageQuality.supported(by: newModel).contains(formDraft.quality) {
                     formDraft.quality = .high
@@ -773,66 +745,51 @@ private struct GeneratorSidebar: View {
                     formDraft.outputFormat = .png
                 }
             }
-
-            Text(ImageModelOption(id: formDraft.imageModel).guidance)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if formDraft.imageModel.isGeminiImageModel {
-                Text("Nano Banana Pro uses Gemini billing and generates native PNG images. Choose aspect ratio and resolution independently; OpenAI quality and moderation controls do not apply.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
         }
     }
 
     private var shotModeSelector: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let picker = Picker("Shot mode", selection: $formDraft.shotMode) {
+            ForEach(ShotMode.allCases) { mode in
+                Text(mode.title).tag(mode)
+            }
+        }
+        return VStack(alignment: .leading, spacing: 10) {
             Text("Shot mode")
                 .font(.headline)
 
-            Picker("Shot mode", selection: $formDraft.shotMode) {
-                ForEach(ShotMode.allCases) { mode in
-                    Text(mode.title).tag(mode)
-                }
+            ViewThatFits(in: .horizontal) {
+                picker.pickerStyle(.segmented)
+                picker.pickerStyle(.menu)
             }
-            .pickerStyle(.segmented)
             .labelsHidden()
-
-            Text(formDraft.shotMode.subtitle)
-                .font(.footnote)
-                .foregroundStyle(formDraft.shotMode == .plain ? Color.soundbrennerPrimary500 : (formDraft.shotMode.allowsModelSelection ? .secondary : Color.orange))
+            .help(formDraft.shotMode.subtitle)
+            .accessibilityHint(formDraft.shotMode.subtitle)
         }
     }
 
     private var audienceSelector: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "person.2.crop.square.stack")
-                    .foregroundStyle(Color.soundbrennerPrimary500)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Audience")
-                        .font(.headline)
-                    Text("This parent choice filters the model and creative-layer options below.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+        let picker = Picker("Audience", selection: $formDraft.audience) {
+            ForEach(AudienceKind.allCases) { audience in
+                Text(audience.title).tag(audience)
             }
+        }
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Audience")
+                .font(.headline)
 
-            Picker("Audience", selection: $formDraft.audience) {
-                ForEach(AudienceKind.allCases) { audience in
-                    Text(audience.title).tag(audience)
-                }
+            ViewThatFits(in: .horizontal) {
+                picker.pickerStyle(.segmented)
+                picker.pickerStyle(.menu)
             }
-            .pickerStyle(.segmented)
             .labelsHidden()
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(12)
-        .background(Color.soundbrennerPrimary500.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+        .background(Color.mediaforgeAccent.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
         .overlay {
             RoundedRectangle(cornerRadius: 16)
-                .stroke(Color.soundbrennerPrimary500.opacity(0.22), lineWidth: 1)
+                .stroke(Color.mediaforgeAccent.opacity(0.22), lineWidth: 1)
         }
     }
 
@@ -892,7 +849,7 @@ private struct GeneratorSidebar: View {
                 .toggleStyle(.switch)
             }
 
-            PersistentMultiSelectMenu(
+            MultiSelectionMenu(
                 selectionTitle: selectionSummary(
                     selectedNames: appModel.selectedAdAngleIDs.compactMap { id in
                         adAngleStore.adAngle(with: id)?.name
@@ -915,7 +872,7 @@ private struct GeneratorSidebar: View {
             if appModel.useRandomAdAngle {
                 Text("Random ad angle will be picked per image.")
                     .font(.footnote)
-                    .foregroundStyle(Color.soundbrennerPrimary500)
+                    .foregroundStyle(Color.mediaforgeAccent)
             } else if appModel.selectedAdAngleIDs.count == 1,
                       let adAngle = adAngleStore.adAngle(with: appModel.selectedAdAngleID) {
                 adAngleSummary(adAngle)
@@ -970,14 +927,6 @@ private struct GeneratorSidebar: View {
             HStack {
                 Text("Creative layers")
                     .font(.headline)
-                if formDraft.shotMode.usesAudienceSelection {
-                    Text(formDraft.audience.title)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.soundbrennerPrimary500)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.soundbrennerPrimary500.opacity(0.12), in: Capsule())
-                }
                 Spacer()
                 Button("Clear all") {
                     appModel.clearCreativeLayers()
@@ -987,10 +936,6 @@ private struct GeneratorSidebar: View {
                     refreshJSONLibraries()
                 }
             }
-
-            Text("Audience controls only affect models and location. Composition and look stay neutral.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
 
             productSelector
 
@@ -1066,7 +1011,7 @@ private struct GeneratorSidebar: View {
                 .toggleStyle(.switch)
             }
 
-            PersistentMultiSelectMenu(
+            MultiSelectionMenu(
                 selectionTitle: selectionSummary(
                     selectedNames: appModel.selectedModelIDs.compactMap { id in
                         promptModelStore.profile(with: id)?.name
@@ -1090,7 +1035,7 @@ private struct GeneratorSidebar: View {
                 if appModel.randomModelMode != .none {
                     Text("\(appModel.randomModelMode.title) will be picked per image.")
                         .font(.caption)
-                        .foregroundStyle(Color.soundbrennerPrimary500)
+                        .foregroundStyle(Color.mediaforgeAccent)
                 } else if appModel.selectedModelIDs.count > 1 {
                     Text("\(appModel.selectedModelIDs.count) selected models. One will be used per generated image.")
                         .font(.caption)
@@ -1114,17 +1059,8 @@ private struct GeneratorSidebar: View {
 
     private var audienceDependentLayerGroup: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "person.2.crop.square.stack")
-                    .foregroundStyle(Color.soundbrennerPrimary500)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("\(formDraft.audience.title) layers")
-                        .font(.subheadline.weight(.semibold))
-                    Text("Only this box changes when you switch audience.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            Text("\(formDraft.audience.title) layers")
+                .font(.subheadline.weight(.semibold))
 
             if formDraft.shotMode.allowsModelSelection {
                 modelLayerSelector
@@ -1133,10 +1069,10 @@ private struct GeneratorSidebar: View {
             presetSelector(for: .setting)
         }
         .padding(12)
-        .background(Color.soundbrennerPrimary500.opacity(0.08), in: RoundedRectangle(cornerRadius: 18))
+        .background(Color.mediaforgeAccent.opacity(0.08), in: RoundedRectangle(cornerRadius: 18))
         .overlay {
             RoundedRectangle(cornerRadius: 18)
-                .stroke(Color.soundbrennerPrimary500.opacity(0.28), lineWidth: 1)
+                .stroke(Color.mediaforgeAccent.opacity(0.28), lineWidth: 1)
         }
     }
 
@@ -1162,7 +1098,7 @@ private struct GeneratorSidebar: View {
                     .toggleStyle(.switch)
                 }
 
-                PersistentMultiSelectMenu(
+                MultiSelectionMenu(
                     selectionTitle: selectionSummary(
                         selectedNames: appModel.selectedPresetIDs[category, default: []].compactMap { id in
                             promptPresetStore.profile(with: id)?.name
@@ -1186,7 +1122,7 @@ private struct GeneratorSidebar: View {
                 if isRandom {
                     Text("\(category.randomTitle) will be picked per image.")
                         .font(.caption)
-                        .foregroundStyle(Color.soundbrennerPrimary500)
+                        .foregroundStyle(Color.mediaforgeAccent)
                 } else if appModel.selectedPresetIDs[category, default: []].count > 1 {
                     Text("\(appModel.selectedPresetIDs[category, default: []].count) \(category.title.lowercased()) options selected. One will be used per generated image.")
                         .font(.caption)
@@ -1333,11 +1269,11 @@ private struct GeneratorSidebar: View {
                 } label: {
                     HStack(spacing: 10) {
                         RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.soundbrennerPrimary500.opacity(0.14))
+                            .fill(Color.mediaforgeAccent.opacity(0.14))
                             .frame(width: 40, height: 40)
                             .overlay {
                                 Image(systemName: "shuffle")
-                                    .foregroundStyle(Color.soundbrennerPrimary500)
+                                    .foregroundStyle(Color.mediaforgeAccent)
                             }
 
                         VStack(alignment: .leading, spacing: 2) {
@@ -1527,48 +1463,37 @@ private extension ContentView {
 
     private var detail: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if appModel.generatorMode != .adLocalization {
+            if let error = galleryStore.historyError {
                 HStack {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                    TextField("Search prompts", text: $promptSearch)
-                        .textFieldStyle(.plain)
-                        .accessibilityLabel("Search prompts")
-                    if !promptSearch.isEmpty {
-                        Button {
-                            promptSearch = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Clear prompt search")
-                    }
-                    Text("\(matchingJobs.count) results")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Label(error, systemImage: "exclamationmark.triangle")
+                    Spacer()
+                    Button("Retry loading") { galleryStore.loadHistory() }
                 }
                 .padding(16)
-                Divider()
+                .background(.bar)
             }
-            if appModel.generatorMode == .adLocalization {
-                adLocalizationDetail
-            } else if !appModel.pendingGenerations.isEmpty || !galleryStore.jobs.isEmpty {
+
+            if !appModel.pendingGenerations.isEmpty || !galleryStore.jobs.isEmpty {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 24) {
+                    LazyVStack(alignment: .leading, spacing: 22) {
+                        if !promptSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Text("\(matchingJobs.count) matches")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                         if !appModel.pendingGenerations.isEmpty {
                             pendingGenerationsSection
                         }
 
                         if matchingJobs.isEmpty && !promptSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            ContentUnavailableView("No Matching Prompts", systemImage: "magnifyingglass", description: Text("Try different words or clear the search."))
+                            ContentUnavailableView("No matching prompts", systemImage: "magnifyingglass", description: Text("Try different words or clear the search."))
                         }
                         ForEach(matchingJobs) { job in
-                            VStack(alignment: .leading, spacing: 8) {
+                            VStack(alignment: .leading, spacing: 12) {
                                 header(for: job)
 
                                 if job.isFailed {
                                     failedGenerationCard(for: job)
-                                        .padding(.horizontal, 12)
                                 } else {
                                     LazyVGrid(columns: columns, alignment: .leading, spacing: 16) {
                                         ForEach(job.images) { image in
@@ -1577,13 +1502,14 @@ private extension ContentView {
                                     }
                                 }
                             }
+                            .workspaceSection()
                         }
                     }
                     .padding(20)
                 }
-            } else {
+            } else if galleryStore.historyError == nil {
                 ContentUnavailableView(
-                    "No Images Yet",
+                    "No images yet",
                     systemImage: "photo.on.rectangle.angled",
                     description: Text("Generate your first batch and it will appear here.")
                 )
@@ -1592,75 +1518,6 @@ private extension ContentView {
         .background(Color(nsColor: .windowBackgroundColor))
         .task {
             await appModel.refreshAvailableImageModels()
-        }
-    }
-
-    private var adLocalizationDetail: some View {
-        Group {
-            if appModel.adLocalizationJobs.isEmpty {
-                ContentUnavailableView(
-                    "No Localized Ads Yet",
-                    systemImage: "rectangle.on.rectangle.angled",
-                    description: Text("Choose a source folder, select language + currency markets, and generate localized variants.")
-                )
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        HStack {
-                            Text("Ad Localization")
-                                .font(.title2.weight(.semibold))
-                            Spacer()
-                            metadataPill(appModel.adLocalizationProgressText)
-                        }
-
-                        ForEach(appModel.adLocalizationJobs) { job in
-                            HStack(spacing: 12) {
-                                GalleryThumbnailImage(
-                                    fileURL: URL(fileURLWithPath: job.sourcePath),
-                                    cacheKey: "ad-localization-source-\(job.sourcePath)",
-                                    maxPixelSize: 240
-                                )
-                                .frame(width: 72, height: 72)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(job.sourceFileName)
-                                        .font(.headline)
-                                        .lineLimit(1)
-                                    Text(job.language.title)
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
-                                    if let outputPath = job.outputPath {
-                                        Text(outputPath)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
-                                    } else if let errorMessage = job.errorMessage {
-                                        Text(errorMessage)
-                                            .font(.caption)
-                                            .foregroundStyle(job.status == .skipped ? Color.secondary : Color.orange)
-                                            .lineLimit(2)
-                                    }
-                                }
-
-                                Spacer()
-
-                                adLocalizationStatusPill(job.status)
-
-                                if let outputPath = job.outputPath {
-                                    Button("Reveal") {
-                                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: outputPath)])
-                                    }
-                                    .buttonStyle(.bordered)
-                                }
-                            }
-                            .padding(12)
-                            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-                        }
-                    }
-                    .padding(20)
-                }
-            }
         }
     }
 
@@ -1689,9 +1546,9 @@ private extension ContentView {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(pending.prompt)
+                    Text(GalleryPromptTitle.text(for: pending.prompt))
                         .font(.title3.weight(.semibold))
-                        .lineLimit(3)
+                        .lineLimit(2)
 
                     Text(pending.createdAt.formatted(date: .abbreviated, time: .shortened))
                         .foregroundStyle(.secondary)
@@ -1718,7 +1575,7 @@ private extension ContentView {
                     if let adAngleSnapshot = pending.adAngleSnapshot {
                         HStack(spacing: 8) {
                             Image(systemName: pending.randomAdAngle ? "shuffle" : "rectangle.on.rectangle")
-                                .foregroundStyle(Color.soundbrennerPrimary500)
+                                .foregroundStyle(Color.mediaforgeAccent)
 
                             Text(pending.randomAdAngle ? "Random ad angle: \(adAngleSnapshot.name)" : "Ad angle: \(adAngleSnapshot.name)")
                                 .font(.subheadline)
@@ -1730,7 +1587,7 @@ private extension ContentView {
                     if !pending.promotionalContextSnapshots.isEmpty {
                         HStack(spacing: 8) {
                             Image(systemName: pending.randomPromotionalContext ? "shuffle" : "tag")
-                                .foregroundStyle(Color.soundbrennerPrimary500)
+                                .foregroundStyle(Color.mediaforgeAccent)
 
                             Text(pending.randomPromotionalContext ? "Random promotional context: \(setupNames(pending.promotionalContextSnapshots))" : "Promotional context: \(setupNames(pending.promotionalContextSnapshots))")
                                 .font(.subheadline)
@@ -1774,19 +1631,21 @@ private extension ContentView {
 
     private func pendingActionButtons(for pending: PendingGenerationBatch) -> some View {
         HStack(spacing: 8) {
-            Button("Copy setup") {
-                copySetup(from: pending)
+            Button("Copy setup") { copySetup(from: pending) }
+                .buttonStyle(MediaforgeActionStyle())
+            Menu {
+                Button("View prompt") {
+                    previewedPrompt = GalleryPromptPreview(id: pending.id, text: pending.prompt)
+                }
+                Button("Copy prompt") { copyPrompt(for: pending) }
+                Button("Copy prompt and JSON") { copyPromptWithJSONs(for: pending) }
+            } label: {
+                Image(systemName: "ellipsis")
             }
-
-            Button("Copy prompt") {
-                copyPrompt(for: pending)
-            }
-
-            Button("Copy prompt + JSONs") {
-                copyPromptWithJSONs(for: pending)
-            }
+            .menuStyle(.borderlessButton)
+            .help("Generation actions")
+            .accessibilityLabel("Generation actions")
         }
-        .buttonStyle(.bordered)
     }
 
     private func elapsedTimeText(from startDate: Date, to endDate: Date) -> String {
@@ -1804,9 +1663,9 @@ private extension ContentView {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(job.inputPrompt)
+                    Text(GalleryPromptTitle.text(for: job.inputPrompt))
                         .font(.title3.weight(.semibold))
-                        .lineLimit(3)
+                        .lineLimit(2)
 
                     Text(job.createdAt.formatted(date: .abbreviated, time: .shortened))
                         .foregroundStyle(.secondary)
@@ -1833,7 +1692,7 @@ private extension ContentView {
                     if let adAngleSnapshot = job.adAngleSnapshot {
                         HStack(spacing: 8) {
                             Image(systemName: job.randomAdAngle ? "shuffle" : "rectangle.on.rectangle")
-                                .foregroundStyle(Color.soundbrennerPrimary500)
+                                .foregroundStyle(Color.mediaforgeAccent)
 
                             Text(job.randomAdAngle ? "Random ad angle: \(adAngleSnapshot.name)" : "Ad angle: \(adAngleSnapshot.name)")
                                 .font(.subheadline)
@@ -1845,7 +1704,7 @@ private extension ContentView {
                     if !job.promotionalContextSnapshots.isEmpty {
                         HStack(spacing: 8) {
                             Image(systemName: job.randomPromotionalContext ? "shuffle" : "tag")
-                                .foregroundStyle(Color.soundbrennerPrimary500)
+                                .foregroundStyle(Color.mediaforgeAccent)
 
                             Text(job.randomPromotionalContext ? "Random promotional context: \(setupNames(job.promotionalContextSnapshots))" : "Promotional context: \(setupNames(job.promotionalContextSnapshots))")
                                 .font(.subheadline)
@@ -1864,50 +1723,33 @@ private extension ContentView {
 
                 HStack(spacing: 8) {
                     if job.isFailed {
-                        Button("Retry") {
-                            retry(job)
+                        Button("Retry") { retry(job) }
+                            .buttonStyle(MediaforgeActionStyle(prominent: true))
+                    }
+
+                    Button("Copy setup") { copySetup(from: job) }
+                        .buttonStyle(MediaforgeActionStyle())
+
+                    Menu {
+                        Button("View prompt") {
+                            previewedPrompt = GalleryPromptPreview(id: job.id, text: job.inputPrompt)
                         }
-
-                        Button("Delete") {
-                            delete(job: job)
+                        Button("Copy prompt") { copyPrompt(for: job) }
+                        Button("Copy prompt and JSON") { copyPromptWithJSONs(for: job) }
+                        if job.isFailed {
+                            Divider()
+                            Button("Delete", role: .destructive) { delete(job: job) }
                         }
+                    } label: {
+                        Image(systemName: "ellipsis")
                     }
-
-                    Button("Copy setup") {
-                        copySetup(from: job)
-                    }
-
-                    Button("Copy prompt") {
-                        copyPrompt(for: job)
-                    }
-
-                    Button("Copy prompt + JSONs") {
-                        copyPromptWithJSONs(for: job)
-                    }
+                    .menuStyle(.borderlessButton)
+                    .help("Generation actions")
+                    .accessibilityLabel("Generation actions")
                 }
-                .buttonStyle(.bordered)
             }
 
-            if let failureMessage = job.failureMessage {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-
-                    Text("Failed")
-                        .fontWeight(.semibold)
-
-                    Text(failureMessage)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-                .font(.subheadline)
-                .padding(.top, 4)
-            }
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
-        .padding(.bottom, 2)
-        .background(Color(nsColor: .controlBackgroundColor))
     }
 
     private func modelSummary(for job: GenerationJob) -> some View {
@@ -2183,31 +2025,6 @@ private extension ContentView {
             .background(Color.primary.opacity(0.08), in: Capsule())
     }
 
-    private func adLocalizationStatusPill(_ status: AdLocalizationJobStatus) -> some View {
-        let colors = adLocalizationStatusColors(for: status)
-        return Text(status.title)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(colors.foreground)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(colors.background, in: Capsule())
-    }
-
-    private func adLocalizationStatusColors(for status: AdLocalizationJobStatus) -> (foreground: Color, background: Color) {
-        switch status {
-        case .queued:
-            (Color.secondary, Color.secondary.opacity(0.12))
-        case .running:
-            (Color.white, Color(nsColor: .systemBlue))
-        case .succeeded:
-            (Color.white, Color(nsColor: .systemGreen))
-        case .skipped:
-            (Color.secondary, Color.secondary.opacity(0.12))
-        case .failed:
-            (Color.white, Color(nsColor: .systemRed))
-        }
-    }
-
     private func imageCard(_ image: GalleryImage, in job: GenerationJob) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Button {
@@ -2217,74 +2034,76 @@ private extension ContentView {
             } label: {
                 GalleryThumbnailImage(
                     fileURL: galleryStore.imageURL(for: image),
-                    cacheKey: image.fileName
+                    cacheKey: image.fileName,
+                    contentMode: .fit
                 )
-                .frame(maxWidth: .infinity)
-                .frame(height: 220)
+                .aspectRatio(1.6, contentMode: .fit)
                 .clipShape(RoundedRectangle(cornerRadius: 14))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Preview image")
 
-            Text(image.fileName)
-                .font(.caption)
-                .lineLimit(2)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Text(image.format.title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help(image.fileName)
 
-            HStack {
-                Button("Export") {
+                Spacer(minLength: 4)
+                Button {
                     appModel.export(image: image, using: galleryStore)
+                } label: {
+                    Label("Export image", systemImage: "square.and.arrow.up")
+                        .labelStyle(.iconOnly)
                 }
+                .buttonStyle(MediaforgeActionStyle())
+                .help("Export image")
 
-                Button("Reveal") {
-                    NSWorkspace.shared.activateFileViewerSelecting([galleryStore.imageURL(for: image)])
+                Menu {
+                    Button("Reveal in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([galleryStore.imageURL(for: image)])
+                    }
+                    Divider()
+                    Button("Delete image", role: .destructive) {
+                        delete(image: image, from: job)
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
                 }
-
-                Button("Delete") {
-                    delete(image: image, from: job)
-                }
+                .menuStyle(.borderlessButton)
+                .help("Image actions")
+                .accessibilityLabel("Image actions")
             }
-            .buttonStyle(.bordered)
         }
-        .padding(14)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 18))
     }
 
     private func failedGenerationCard(for job: GenerationJob) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color.orange.opacity(0.08))
-                .frame(maxWidth: .infinity)
-                .frame(height: 180)
-                .overlay {
-                    VStack(spacing: 10) {
-                        Image(systemName: "wifi.exclamationmark")
-                            .font(.title2)
-                            .foregroundStyle(.orange)
-
-                        Text("No image was generated")
-                            .font(.headline)
-
-                        if let failureMessage = job.failureMessage {
-                            Text(failureMessage)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                                .lineLimit(3)
-                                .padding(.horizontal, 24)
-                        }
-                    }
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.circle")
+                .foregroundStyle(Color.mediaforgeAccent)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Generation failed")
+                    .font(.subheadline.weight(.semibold))
+                if let failureMessage = job.failureMessage {
+                    Text(failureMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .help(failureMessage)
                 }
+            }
         }
-        .padding(14)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 18))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color.mediaforgeAccent.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func pendingImageCard(index: Int, total: Int) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             RoundedRectangle(cornerRadius: 14)
                 .fill(Color.secondary.opacity(0.08))
-                .frame(maxWidth: .infinity)
-                .frame(height: 220)
+                .aspectRatio(1.6, contentMode: .fit)
                 .overlay {
                     VStack(spacing: 10) {
                         ProgressView()
@@ -2542,22 +2361,17 @@ private struct ReferencePhotoRow: View {
                             .stroke(Color.primary.opacity(0.08))
                     }
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(title)
-                            .font(.footnote)
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-
-                        Text("Click to preview")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text(title)
+                        .font(.footnote)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
 
                     Spacer()
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityHint("Opens the photo preview.")
 
             Button("Remove", action: removeAction)
                 .buttonStyle(.borderless)
@@ -2571,33 +2385,32 @@ private struct GalleryThumbnailImage: View {
     let fileURL: URL
     let cacheKey: String
     var maxPixelSize = 720
+    var contentMode: ContentMode = .fill
 
     @State private var thumbnail: NSImage?
 
     var body: some View {
-        ZStack {
-            if let thumbnail {
-                Image(nsImage: thumbnail)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Rectangle()
-                    .fill(Color.secondary.opacity(0.1))
-                    .overlay {
-                        Image(systemName: "photo")
-                            .font(.largeTitle)
-                            .foregroundStyle(.secondary)
-                    }
+        Rectangle()
+            .fill(Color.secondary.opacity(0.08))
+            .overlay {
+                if let thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: contentMode)
+                } else {
+                    Image(systemName: "photo")
+                        .font(.largeTitle)
+                        .foregroundStyle(.secondary)
+                }
             }
-        }
-        .clipped()
-        .task(id: cacheKey) {
+            .clipped()
+            .task(id: cacheKey) {
                 thumbnail = await GalleryThumbnailLoader.thumbnail(
                     for: fileURL,
                     cacheKey: cacheKey,
                     maxPixelSize: maxPixelSize
                 )
-        }
+            }
     }
 }
 
@@ -2691,6 +2504,41 @@ private struct GalleryPreviewItem: Identifiable {
     let fileURL: URL
 }
 
+private struct GalleryPromptPreview: Identifiable {
+    let id: UUID
+    let text: String
+}
+
+private struct GalleryPromptSheet: View {
+    let item: GalleryPromptPreview
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Prompt")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Button("Done") { dismiss() }
+                    .buttonStyle(MediaforgeActionStyle(prominent: true))
+                    .keyboardShortcut(.defaultAction)
+            }
+
+            ScrollView {
+                Text(item.text)
+                    .font(item.text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{")
+                          ? .system(.body, design: .monospaced) : .body)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        }
+        .padding(20)
+        .frame(width: 580, height: 400)
+    }
+}
+
 private struct ImagePreviewSheet: View {
     let item: GalleryPreviewItem
     @Environment(\.dismiss) private var dismiss
@@ -2714,6 +2562,8 @@ private struct ImagePreviewSheet: View {
                 Button("Done") {
                     dismiss()
                 }
+                .buttonStyle(MediaforgeActionStyle(prominent: true))
+                .keyboardShortcut(.defaultAction)
             }
 
             GeometryReader { proxy in
@@ -2743,7 +2593,7 @@ private struct ImagePreviewSheet: View {
 
                 Spacer()
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(MediaforgeActionStyle())
         }
         .padding(24)
         .frame(minWidth: 760, minHeight: 620)
@@ -2819,7 +2669,7 @@ private struct ModelManagerSheet: View {
         }
         .padding(24)
         .frame(width: 900, height: 560)
-        .tint(.soundbrennerPrimary500)
+        .tint(.mediaforgeAccent)
         .onAppear {
             draftSelectedModelIDs = appModel.selectedModelIDs
             if editingSelectionID == nil {
@@ -2833,7 +2683,7 @@ private struct ModelManagerSheet: View {
             Button("Create model") {
                 beginCreatingModel()
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(MediaforgeActionStyle())
 
             Button("Edit models") {
                 mode = .edit
@@ -2848,19 +2698,19 @@ private struct ModelManagerSheet: View {
                     beginCreatingModel()
                 }
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(MediaforgeActionStyle())
 
             Button("Clear selection") {
                 draftSelectedModelIDs = []
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(MediaforgeActionStyle())
             .disabled(draftSelectedModelIDs.isEmpty)
 
             Button("Done") {
                 commitSelection()
                 dismiss()
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(MediaforgeActionStyle(prominent: true))
         }
     }
 
@@ -2870,13 +2720,13 @@ private struct ModelManagerSheet: View {
                 mode = .browse
                 errorMessage = nil
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(MediaforgeActionStyle())
 
             Button("Done") {
                 commitSelection()
                 dismiss()
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(MediaforgeActionStyle(prominent: true))
         }
     }
 
@@ -2958,7 +2808,7 @@ private struct ModelManagerSheet: View {
 
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.title3)
-                    .foregroundStyle(isSelected ? Color.soundbrennerPrimary500 : Color.secondary.opacity(0.45))
+                    .foregroundStyle(isSelected ? Color.mediaforgeAccent : Color.secondary.opacity(0.45))
             }
             .padding(14)
             .background(
@@ -2967,7 +2817,7 @@ private struct ModelManagerSheet: View {
             )
             .overlay {
                 RoundedRectangle(cornerRadius: 16)
-                    .stroke(isSelected ? Color.soundbrennerPrimary500 : Color.secondary.opacity(0.14), lineWidth: isSelected ? 2 : 1)
+                    .stroke(isSelected ? Color.mediaforgeAccent : Color.secondary.opacity(0.14), lineWidth: isSelected ? 2 : 1)
             }
         }
         .buttonStyle(.plain)
@@ -2995,7 +2845,7 @@ private struct ModelManagerSheet: View {
                     Button("Add model") {
                         beginCreatingModel()
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(MediaforgeActionStyle())
                 }
             }
             .frame(width: 260)
@@ -3051,7 +2901,7 @@ private struct ModelManagerSheet: View {
                     Button("Save model") {
                         save()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(MediaforgeActionStyle(prominent: true))
                 }
             }
         }
@@ -3109,7 +2959,7 @@ private struct ModelManagerSheet: View {
             )
             .overlay {
                 RoundedRectangle(cornerRadius: 10)
-                    .stroke(isSelected ? Color.soundbrennerPrimary500 : Color.secondary.opacity(0.12), lineWidth: isSelected ? 2 : 1)
+                    .stroke(isSelected ? Color.mediaforgeAccent : Color.secondary.opacity(0.12), lineWidth: isSelected ? 2 : 1)
             }
         }
         .buttonStyle(.plain)
@@ -3245,7 +3095,7 @@ private struct CameraManagerSheet: View {
         }
         .padding(24)
         .frame(width: 900, height: 560)
-        .tint(.soundbrennerPrimary500)
+        .tint(.mediaforgeAccent)
         .onAppear {
             draftSelectedCameraID = appModel.selectedCameraID
             if let selectedID = draftSelectedCameraID,
@@ -3263,7 +3113,7 @@ private struct CameraManagerSheet: View {
             Button("Create style") {
                 beginCreatingCamera()
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(MediaforgeActionStyle())
 
             Button("Edit styles") {
                 mode = .edit
@@ -3277,13 +3127,13 @@ private struct CameraManagerSheet: View {
                     beginCreatingCamera()
                 }
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(MediaforgeActionStyle())
 
             Button("Done") {
                 appModel.selectCamera(draftSelectedCameraID)
                 dismiss()
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(MediaforgeActionStyle(prominent: true))
         }
     }
 
@@ -3293,13 +3143,13 @@ private struct CameraManagerSheet: View {
                 mode = .browse
                 errorMessage = nil
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(MediaforgeActionStyle())
 
             Button("Done") {
                 appModel.selectCamera(draftSelectedCameraID)
                 dismiss()
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(MediaforgeActionStyle(prominent: true))
         }
     }
 
@@ -3381,7 +3231,7 @@ private struct CameraManagerSheet: View {
 
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.title3)
-                    .foregroundStyle(isSelected ? Color.soundbrennerPrimary500 : Color.secondary.opacity(0.45))
+                    .foregroundStyle(isSelected ? Color.mediaforgeAccent : Color.secondary.opacity(0.45))
             }
             .padding(14)
             .background(
@@ -3390,7 +3240,7 @@ private struct CameraManagerSheet: View {
             )
             .overlay {
                 RoundedRectangle(cornerRadius: 16)
-                    .stroke(isSelected ? Color.soundbrennerPrimary500 : Color.secondary.opacity(0.14), lineWidth: isSelected ? 2 : 1)
+                    .stroke(isSelected ? Color.mediaforgeAccent : Color.secondary.opacity(0.14), lineWidth: isSelected ? 2 : 1)
             }
         }
         .buttonStyle(.plain)
@@ -3413,7 +3263,7 @@ private struct CameraManagerSheet: View {
                 Button("Add style") {
                     beginCreatingCamera()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(MediaforgeActionStyle())
             }
             .frame(width: 260)
 
@@ -3456,7 +3306,7 @@ private struct CameraManagerSheet: View {
                     Button("Save style") {
                         save()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(MediaforgeActionStyle(prominent: true))
                 }
             }
         }
@@ -3491,7 +3341,7 @@ private struct CameraManagerSheet: View {
             )
             .overlay {
                 RoundedRectangle(cornerRadius: 10)
-                    .stroke(isSelected ? Color.soundbrennerPrimary500 : Color.secondary.opacity(0.12), lineWidth: isSelected ? 2 : 1)
+                    .stroke(isSelected ? Color.mediaforgeAccent : Color.secondary.opacity(0.12), lineWidth: isSelected ? 2 : 1)
             }
         }
         .buttonStyle(.plain)
