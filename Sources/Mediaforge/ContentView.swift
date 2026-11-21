@@ -108,6 +108,46 @@ private enum SidebarLayout {
     static let maxWidth: CGFloat = 560
 }
 
+private struct InitialWindowFocus: NSViewRepresentable {
+    func makeNSView(context: Context) -> FocusView {
+        FocusView()
+    }
+
+    func updateNSView(_ nsView: FocusView, context: Context) {}
+
+    final class FocusView: NSView {
+        private weak var configuredWindow: NSWindow?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            NotificationCenter.default.removeObserver(self)
+            guard let window, configuredWindow !== window else { return }
+            if window.isKeyWindow {
+                resetInitialFocus(in: window)
+            } else {
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(windowDidBecomeKey(_:)),
+                    name: NSWindow.didBecomeKeyNotification, object: window
+                )
+            }
+        }
+
+        @objc private func windowDidBecomeKey(_ notification: Notification) {
+            guard let window = notification.object as? NSWindow else { return }
+            resetInitialFocus(in: window)
+        }
+
+        private func resetInitialFocus(in window: NSWindow) {
+            configuredWindow = window
+            NotificationCenter.default.removeObserver(self)
+            // Leave the window itself focused after SwiftUI chooses a startup control.
+            DispatchQueue.main.async { [weak window] in
+                _ = window?.makeFirstResponder(nil)
+            }
+        }
+    }
+}
+
 private struct MultiSelectOption<ID: Hashable>: Identifiable {
     let id: ID
     let title: String
@@ -175,6 +215,7 @@ struct ContentView: View {
             searchableGallery.navigationTitle("Gallery")
         }
         .navigationSplitViewStyle(.balanced)
+        .background(InitialWindowFocus().allowsHitTesting(false).accessibilityHidden(true))
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 accountMenu
