@@ -158,6 +158,8 @@ Do not add credentials to source files, test fixtures, JSON profiles committed t
 
 ## Test
 
+The Swift package and the standard Xcode project build from this checkout without access to a private Swift package.
+
 ```sh
 swift test
 ```

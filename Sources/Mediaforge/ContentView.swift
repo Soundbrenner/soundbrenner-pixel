@@ -297,7 +297,7 @@ struct ContentView: View {
             .fixedSize(horizontal: false, vertical: true)
 
             if let message = appModel.teamAccessMessage {
-                Text(message).font(.callout).foregroundStyle(.secondary)
+                Text(message).font(.callout).foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 20)
             }
