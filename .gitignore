@@ -22,3 +22,5 @@ DerivedData/
 *.p12
 *.p8
 *.pem
+
+__pycache__/
